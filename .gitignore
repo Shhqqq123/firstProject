@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.idea/
+models/
+reports/
+data/medical_system.db
+

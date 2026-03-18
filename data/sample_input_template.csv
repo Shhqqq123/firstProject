@@ -1,0 +1,5 @@
+test_date,akr1b10,ca19_9,nse,ca125,ca153,cea,clinical_stage,label
+2026-03-01,8.1,14.2,12.3,18.5,22.7,3.2,screening,normal
+2026-03-02,10.3,18.8,15.2,24.7,28.9,4.1,benign_followup,benign
+2026-03-03,18.6,39.1,23.8,41.2,57.4,8.9,cancer_followup,malignant
+
