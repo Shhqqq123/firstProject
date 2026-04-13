@@ -40,9 +40,14 @@ from medical_system.reporting import generate_report_html, generate_report_pdf
 from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn_class
 
 
-st.set_page_config(page_title="Breast Risk Assessment", page_icon=":hospital:", layout="wide")
+st.set_page_config(page_title="乳腺风险评估系统", page_icon=":hospital:", layout="wide")
 ensure_directories()
 init_db()
+
+
+ROLE_NAME_MAP = {"admin": "管理员", "doctor": "医生", "viewer": "只读用户"}
+STAGE_NAME_MAP = {"screening": "体检筛查", "benign_followup": "良性随访", "cancer_followup": "肿瘤随访"}
+LABEL_NAME_MAP = {"": "未标注", "normal": "正常", "benign": "良性", "malignant": "恶性"}
 
 
 def _rerun() -> None:
@@ -65,6 +70,79 @@ def can_write() -> bool:
     if not user:
         return False
     return user.get("role") in {"admin", "doctor"}
+
+
+def role_to_cn(role: str) -> str:
+    return ROLE_NAME_MAP.get(role, role)
+
+
+def stage_to_cn(stage: str) -> str:
+    return STAGE_NAME_MAP.get(stage, stage)
+
+
+def label_to_cn(label: str) -> str:
+    return LABEL_NAME_MAP.get(label, label)
+
+
+def _display_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+
+    if "clinical_stage" in out.columns:
+        out["clinical_stage"] = out["clinical_stage"].map(lambda x: stage_to_cn(str(x)) if pd.notna(x) else x)
+    if "label" in out.columns:
+        out["label"] = out["label"].map(lambda x: label_to_cn(str(x)) if pd.notna(x) else x)
+    if "predicted_class" in out.columns:
+        out["predicted_class"] = out["predicted_class"].map(lambda x: to_cn_class(str(x)) if pd.notna(x) else x)
+    if "role" in out.columns:
+        out["role"] = out["role"].map(lambda x: role_to_cn(str(x)) if pd.notna(x) else x)
+    if "is_active" in out.columns:
+        out["is_active"] = out["is_active"].map(lambda x: "启用" if int(x) else "停用")
+    if "warning_flag" in out.columns:
+        out["warning_flag"] = out["warning_flag"].map(lambda x: "是" if int(x) else "否")
+    if "sex" in out.columns:
+        out["sex"] = out["sex"].replace({"Female": "女", "Male": "男"})
+
+    rename_map = {
+        "id": "ID",
+        "subject_id": "受检者ID",
+        "test_id": "检验ID",
+        "name": "姓名",
+        "sex": "性别",
+        "birth_date": "出生日期",
+        "phone": "电话",
+        "note": "备注",
+        "test_date": "检验日期",
+        "clinical_stage": "临床场景",
+        "label": "真实标签",
+        "source": "数据来源",
+        "predicted_class": "预测类别",
+        "normal_prob": "正常概率",
+        "benign_prob": "良性概率",
+        "malignant_prob": "恶性概率",
+        "risk_level": "风险等级",
+        "warning_flag": "预警",
+        "created_at": "创建时间",
+        "username": "用户名",
+        "role": "角色",
+        "is_active": "状态",
+        "action": "动作",
+        "module": "模块",
+        "target_type": "对象类型",
+        "target_id": "对象ID",
+        "details_json": "详情",
+        "eval_created_at": "评估时间",
+    }
+    return out.rename(columns=rename_map)
+
+
+def _read_uploaded_table(uploaded_file: Any) -> pd.DataFrame:
+    """读取上传文件（支持 csv/xlsx）。"""
+    file_name = str(getattr(uploaded_file, "name", "")).lower()
+    if file_name.endswith(".xlsx"):
+        return pd.read_excel(uploaded_file)
+    return pd.read_csv(uploaded_file)
 
 
 def audit(
@@ -132,17 +210,17 @@ def make_synthetic_training_data() -> pd.DataFrame:
 
 
 def login_page() -> None:
-    st.title("Breast Risk Assessment System")
-    st.caption("Login required")
+    st.title("乳腺风险评估系统")
+    st.caption("请先登录")
     with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign In")
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录")
 
     if submitted:
         user = authenticate_user(username=username, password=password)
         if user is None:
-            st.error("Invalid username/password or inactive account.")
+            st.error("用户名或密码错误，或账号已被停用。")
             log_audit_event(
                 user_id=None,
                 username=username.strip() or "unknown",
@@ -155,7 +233,7 @@ def login_page() -> None:
         audit("login_success", "auth")
         _rerun()
 
-    st.info("Default admin account: admin / Admin@123456")
+    st.info("默认管理员账号：admin / Admin@123456")
 
 
 def main() -> None:
@@ -166,120 +244,137 @@ def main() -> None:
     user = current_user()
     assert user is not None
 
-    st.sidebar.write(f"User: `{user['username']}`")
-    st.sidebar.write(f"Role: `{user['role']}`")
-    if st.sidebar.button("Sign Out"):
+    st.sidebar.write(f"当前用户：`{user['username']}`")
+    st.sidebar.write(f"角色：`{role_to_cn(str(user['role']))}`")
+    if st.sidebar.button("退出登录"):
         audit("logout", "auth")
         st.session_state.pop("auth_user", None)
         _rerun()
 
     base_menu = [
-        "Dashboard",
-        "Subjects",
-        "Tests",
-        "Model Training",
-        "Risk Inference",
-        "Follow-up",
-        "Reports",
+        "系统概览",
+        "受检者管理",
+        "检验数据管理",
+        "模型训练",
+        "风险评估",
+        "随访监测",
+        "报告导出",
     ]
-    admin_menu = ["Audit Logs", "User Admin"]
+    admin_menu = ["审计日志", "用户管理"]
     menus = base_menu + admin_menu if is_admin() else base_menu
 
-    menu = st.sidebar.radio("Navigation", menus)
-    st.title("Breast Full-Process Risk Assessment System V1.0")
-    st.caption("For risk screening/support only. Not a final diagnosis.")
+    menu = st.sidebar.radio("功能菜单", menus)
+    st.title("基于6项肿瘤标志物与集成学习的乳腺全流程风险评估系统 V1.0")
+    st.caption("本系统用于风险筛查与辅助参考，不作为最终诊断依据。")
 
-    if menu == "Dashboard":
+    if menu == "系统概览":
         page_dashboard()
-    elif menu == "Subjects":
+    elif menu == "受检者管理":
         page_subjects()
-    elif menu == "Tests":
+    elif menu == "检验数据管理":
         page_tests()
-    elif menu == "Model Training":
+    elif menu == "模型训练":
         page_training()
-    elif menu == "Risk Inference":
+    elif menu == "风险评估":
         page_inference()
-    elif menu == "Follow-up":
+    elif menu == "随访监测":
         page_followup()
-    elif menu == "Reports":
+    elif menu == "报告导出":
         page_report()
-    elif menu == "Audit Logs":
+    elif menu == "审计日志":
         page_audit_logs()
-    elif menu == "User Admin":
+    elif menu == "用户管理":
         page_user_admin()
 
 
 def page_dashboard() -> None:
     stats = dashboard_stats()
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Subjects", stats["subjects"])
-    c2.metric("Tests", stats["tests"])
-    c3.metric("Evaluations", stats["evaluations"])
-    c4.metric("Users", stats["users"])
-    c5.metric("Audit Logs", stats["audits"])
+    c1.metric("受检者数量", stats["subjects"])
+    c2.metric("检验记录数量", stats["tests"])
+    c3.metric("评估记录数量", stats["evaluations"])
+    c4.metric("系统用户数量", stats["users"])
+    c5.metric("审计日志数量", stats["audits"])
 
-    st.subheader("Recent Tests")
+    st.subheader("最近检验记录")
     tests = list_tests()[:20]
     if tests:
-        st.dataframe(pd.DataFrame(tests), use_container_width=True)
+        st.dataframe(_display_df(pd.DataFrame(tests)), use_container_width=True)
     else:
-        st.info("No test records yet.")
+        st.info("暂无检验记录。")
 
 
 def page_subjects() -> None:
     if not can_write():
-        st.warning("Read-only role. Subject editing is disabled.")
+        st.warning("当前角色为只读，不能编辑受检者信息。")
         return
 
-    st.subheader("Add Subject")
+    st.subheader("新增受检者")
     with st.form("add_subject_form", clear_on_submit=True):
-        name = st.text_input("Name*", max_chars=64)
-        sex = st.selectbox("Sex", ["", "Female", "Male"])
-        birth_date = st.text_input("Birth Date (YYYY-MM-DD)")
-        phone = st.text_input("Phone")
-        note = st.text_area("Note")
-        submitted = st.form_submit_button("Save Subject")
+        name = st.text_input("姓名*", max_chars=64)
+        sex = st.selectbox("性别", ["", "女", "男"])
+        birth_date = st.text_input("出生日期（YYYY-MM-DD）")
+        phone = st.text_input("联系电话")
+        note = st.text_area("备注")
+        submitted = st.form_submit_button("保存受检者")
     if submitted:
         if not name.strip():
-            st.error("Name is required.")
+            st.error("姓名不能为空。")
         else:
-            subject_id = add_subject(name=name.strip(), sex=sex or None, birth_date=birth_date or None, phone=phone or None, note=note or None)
+            subject_id = add_subject(
+                name=name.strip(),
+                sex=sex or None,
+                birth_date=birth_date or None,
+                phone=phone or None,
+                note=note or None,
+            )
             audit("create", "subjects", "subject", subject_id, {"name": name.strip()})
-            st.success(f"Subject created: ID={subject_id}")
+            st.success(f"受检者已创建，ID={subject_id}")
 
     st.divider()
-    st.subheader("Subject List")
-    keyword = st.text_input("Search by name/phone")
+    st.subheader("受检者列表")
+    keyword = st.text_input("按姓名或电话搜索")
     rows = list_subjects(keyword=keyword)
     if not rows:
-        st.info("No subjects found.")
+        st.info("未找到受检者。")
         return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(_display_df(pd.DataFrame(rows)), use_container_width=True)
 
     options = {f"{r['id']} - {r['name']}": r["id"] for r in rows}
-    selected = st.selectbox("Select subject", list(options.keys()))
+    selected = st.selectbox("选择受检者", list(options.keys()))
     subject_id = options[selected]
     current = get_subject(subject_id)
     if not current:
         return
 
-    with st.form("edit_subject_form"):
-        name = st.text_input("Name", value=current.get("name") or "")
-        sex = st.selectbox("Sex", ["", "Female", "Male"], index=["", "Female", "Male"].index(current.get("sex") or ""))
-        birth_date = st.text_input("Birth Date", value=current.get("birth_date") or "")
-        phone = st.text_input("Phone", value=current.get("phone") or "")
-        note = st.text_area("Note", value=current.get("note") or "")
-        do_update = st.form_submit_button("Update Subject")
-    if do_update:
-        update_subject(subject_id, name=name, sex=sex or None, birth_date=birth_date or None, phone=phone or None, note=note or None)
-        audit("update", "subjects", "subject", subject_id, {"name": name})
-        st.success("Updated.")
+    current_sex = current.get("sex") or ""
+    sex_options = ["", "女", "男", "Female", "Male"]
+    sex_index = sex_options.index(current_sex) if current_sex in sex_options else 0
 
-    if st.checkbox("Enable delete subject"):
-        if st.button("Delete Subject", type="primary"):
+    with st.form("edit_subject_form"):
+        name = st.text_input("姓名", value=current.get("name") or "")
+        sex = st.selectbox("性别", sex_options, index=sex_index)
+        birth_date = st.text_input("出生日期", value=current.get("birth_date") or "")
+        phone = st.text_input("联系电话", value=current.get("phone") or "")
+        note = st.text_area("备注", value=current.get("note") or "")
+        do_update = st.form_submit_button("更新受检者")
+    if do_update:
+        update_subject(
+            subject_id,
+            name=name,
+            sex=sex or None,
+            birth_date=birth_date or None,
+            phone=phone or None,
+            note=note or None,
+        )
+        audit("update", "subjects", "subject", subject_id, {"name": name})
+        st.success("受检者信息已更新。")
+
+    if st.checkbox("启用删除受检者"):
+        if st.button("删除受检者", type="primary"):
             delete_subject(subject_id)
             audit("delete", "subjects", "subject", subject_id)
-            st.success("Deleted.")
+            st.success("已删除。")
             _rerun()
 
 
@@ -289,8 +384,9 @@ def _marker_form(prefix: str, defaults: dict[str, float] | None = None) -> dict[
     cols = st.columns(3)
     for idx, name in enumerate(FEATURE_COLUMNS):
         with cols[idx % 3]:
+            marker_display = "CA19-9" if name == "ca19_9" else name.upper()
             values[name] = st.number_input(
-                f"{name.upper()}",
+                marker_display,
                 min_value=0.0,
                 value=float(defaults.get(name, 0.0)),
                 key=f"{prefix}_{name}",
@@ -301,24 +397,32 @@ def _marker_form(prefix: str, defaults: dict[str, float] | None = None) -> dict[
 
 def page_tests() -> None:
     if not can_write():
-        st.warning("Read-only role. Test editing is disabled.")
+        st.warning("当前角色为只读，不能编辑检验数据。")
         return
 
     subject_options = fetch_subject_options()
     if not subject_options:
-        st.warning("Please create a subject first.")
+        st.warning("请先新增受检者。")
         return
 
-    selected_label = st.selectbox("Select Subject", list(subject_options.keys()))
+    selected_label = st.selectbox("选择受检者", list(subject_options.keys()))
     subject_id = subject_options[selected_label]
 
-    st.subheader("Manual Input")
+    st.subheader("手动录入检验数据")
     with st.form("add_test_form", clear_on_submit=True):
-        test_date = st.date_input("Test Date")
-        stage = st.selectbox("Clinical Stage", ["screening", "benign_followup", "cancer_followup"])
-        label = st.selectbox("True Label (for training)", ["", "normal", "benign", "malignant"])
+        test_date = st.date_input("检验日期")
+        stage = st.selectbox(
+            "临床场景",
+            ["screening", "benign_followup", "cancer_followup"],
+            format_func=stage_to_cn,
+        )
+        label = st.selectbox(
+            "真实标签（训练用）",
+            ["", "normal", "benign", "malignant"],
+            format_func=label_to_cn,
+        )
         markers = _marker_form("add")
-        submitted = st.form_submit_button("Save Test")
+        submitted = st.form_submit_button("保存检验记录")
     if submitted:
         new_test_id = add_test(
             subject_id=subject_id,
@@ -328,105 +432,114 @@ def page_tests() -> None:
             label=label or None,
         )
         audit("create", "tests", "test", new_test_id, {"subject_id": subject_id})
-        st.success(f"Test saved: ID={new_test_id}")
+        st.success(f"检验记录已保存，ID={new_test_id}")
 
     st.divider()
-    st.subheader("Batch Import CSV")
-    st.caption("Required columns: test_date, akr1b10, ca19_9, nse, ca125, ca153, cea")
-    upload = st.file_uploader("Upload CSV", type=["csv"])
+    st.subheader("批量导入 CSV/XLSX")
+    st.caption("必需列：test_date, akr1b10, ca19-9, nse, ca125, ca153, cea（也兼容 ca19_9）")
+    upload = st.file_uploader("上传数据文件", type=["csv", "xlsx"])
     if upload is not None:
-        preview_df = pd.read_csv(upload)
-        st.dataframe(preview_df.head(20), use_container_width=True)
-        if st.button("Import CSV"):
+        try:
+            preview_df = _read_uploaded_table(upload)
+            st.dataframe(preview_df.head(20), use_container_width=True)
+        except Exception as exc:
+            st.error(f"文件读取失败：{exc}")
+            return
+        if st.button("执行导入"):
             try:
                 count = import_tests_from_dataframe(preview_df, default_subject_id=subject_id)
                 audit("batch_import", "tests", "subject", subject_id, {"count": count})
-                st.success(f"Imported {count} rows.")
+                st.success(f"导入完成，共 {count} 条。")
             except Exception as exc:
-                st.error(f"Import failed: {exc}")
+                st.error(f"导入失败：{exc}")
 
     st.divider()
-    st.subheader("History")
+    st.subheader("历史检验记录")
     rows = list_tests(subject_id=subject_id)
     if not rows:
-        st.info("No tests for this subject.")
+        st.info("该受检者暂无检验记录。")
         return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(_display_df(pd.DataFrame(rows)), use_container_width=True)
 
-    selected_test = st.selectbox("Select test to edit/delete", [f"{r['id']} - {r['test_date']}" for r in rows])
+    selected_test = st.selectbox("选择要编辑/删除的检验记录", [f"{r['id']} - {r['test_date']}" for r in rows])
     test_id = int(selected_test.split(" - ")[0])
     current = get_test(test_id)
     if not current:
         return
 
     with st.form("edit_test_form"):
-        test_date = st.text_input("Test Date", value=current.get("test_date") or "")
+        test_date = st.text_input("检验日期", value=current.get("test_date") or "")
         stage = st.selectbox(
-            "Clinical Stage",
+            "临床场景",
             ["screening", "benign_followup", "cancer_followup"],
             index=["screening", "benign_followup", "cancer_followup"].index(current.get("clinical_stage") or "screening"),
+            format_func=stage_to_cn,
         )
         label = st.selectbox(
-            "True Label",
+            "真实标签",
             ["", "normal", "benign", "malignant"],
             index=["", "normal", "benign", "malignant"].index(current.get("label") or ""),
+            format_func=label_to_cn,
         )
         markers = _marker_form("edit", defaults=current)
-        do_update = st.form_submit_button("Update Test")
+        do_update = st.form_submit_button("更新检验记录")
     if do_update:
         update_test(test_id=test_id, test_date=test_date, markers=markers, clinical_stage=stage, label=label or None)
         audit("update", "tests", "test", test_id)
-        st.success("Test updated.")
+        st.success("检验记录已更新。")
 
-    if st.checkbox("Enable delete test"):
-        if st.button("Delete Test", type="primary"):
+    if st.checkbox("启用删除检验记录"):
+        if st.button("删除检验记录", type="primary"):
             delete_test(test_id)
             audit("delete", "tests", "test", test_id)
-            st.success("Deleted.")
+            st.success("已删除。")
             _rerun()
 
 
 def page_training() -> None:
     if not can_write():
-        st.warning("Read-only role. Training is disabled.")
+        st.warning("当前角色为只读，不能执行模型训练。")
         return
 
-    st.subheader("Model Training")
+    st.subheader("模型训练")
     source = st.radio(
-        "Training Data Source",
-        ["Database labeled data", "Upload CSV", "Synthetic data (1000 samples)"],
+        "训练数据来源",
+        ["数据库已标注数据", "上传 CSV/XLSX", "合成样本（1000条）"],
         horizontal=True,
     )
     train_df = pd.DataFrame()
 
-    if source == "Database labeled data":
+    if source == "数据库已标注数据":
         train_df = list_labeled_tests()
-        st.write(f"Labeled rows: {len(train_df)}")
+        st.write(f"可用标注样本：{len(train_df)} 条")
         if not train_df.empty:
             st.dataframe(train_df.head(20), use_container_width=True)
-    elif source == "Upload CSV":
-        file = st.file_uploader("Upload training CSV", type=["csv"], key="train_csv")
+    elif source == "上传 CSV/XLSX":
+        file = st.file_uploader("上传训练文件", type=["csv", "xlsx"], key="train_csv")
         if file is not None:
-            train_df = pd.read_csv(file)
-            st.dataframe(train_df.head(20), use_container_width=True)
+            try:
+                train_df = _read_uploaded_table(file)
+                st.dataframe(train_df.head(20), use_container_width=True)
+            except Exception as exc:
+                st.error(f"文件读取失败：{exc}")
     else:
         train_df = make_synthetic_training_data()
-        st.write(f"Synthetic rows: {len(train_df)}")
+        st.write(f"合成样本：{len(train_df)} 条")
         st.dataframe(train_df.head(20), use_container_width=True)
-        if st.button("Import synthetic rows into DB as demo data"):
+        if st.button("导入前200条合成样本到数据库"):
             options = fetch_subject_options()
             if not options:
-                subject_id = add_subject(name="Demo Subject", sex="Female")
+                subject_id = add_subject(name="演示受检者", sex="女")
                 audit("create_demo_subject", "training", "subject", subject_id)
             else:
                 subject_id = next(iter(options.values()))
             imported = import_tests_from_dataframe(train_df.head(200), default_subject_id=subject_id, source="synthetic_demo")
             audit("import_synthetic_demo", "training", "subject", subject_id, {"count": imported})
-            st.success(f"Imported {imported} demo rows into subject {subject_id}.")
+            st.success(f"导入完成，共 {imported} 条，受检者ID={subject_id}")
 
-    if st.button("Train Model", type="primary"):
+    if st.button("开始训练", type="primary"):
         if train_df.empty:
-            st.error("Training data is empty.")
+            st.error("训练数据为空。")
             return
         try:
             model = BreastRiskModel()
@@ -434,51 +547,64 @@ def page_training() -> None:
             model.save(MODEL_PATH)
             audit("train_model", "ml", "model", "breast_risk_model.joblib", result.metrics)
 
-            st.success(f"Training completed. Model saved: {MODEL_PATH}")
+            st.success(f"训练完成，模型已保存：{MODEL_PATH}")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("AUC", f"{result.metrics['auc']:.4f}")
-            c2.metric("Precision", f"{result.metrics['precision']:.4f}")
-            c3.metric("Recall", f"{result.metrics['recall']:.4f}")
-            c4.metric("Accuracy", f"{result.metrics['accuracy']:.4f}")
+            c1.metric("平均AUC", f"{result.metrics['auc']:.4f}")
+            c2.metric("平均Precision", f"{result.metrics['precision']:.4f}")
+            c3.metric("平均Recall", f"{result.metrics['recall']:.4f}")
+            c4.metric("平均Accuracy", f"{result.metrics['accuracy']:.4f}")
+
+            if "malignant_auc" in result.metrics:
+                st.write(
+                    f"恶性任务：AUC={result.metrics['malignant_auc']:.4f}，"
+                    f"Precision={result.metrics['malignant_precision']:.4f}，"
+                    f"Recall={result.metrics['malignant_recall']:.4f}"
+                )
+            if "benign_auc" in result.metrics:
+                st.write(
+                    f"良性任务：AUC={result.metrics['benign_auc']:.4f}，"
+                    f"Precision={result.metrics['benign_precision']:.4f}，"
+                    f"Recall={result.metrics['benign_recall']:.4f}"
+                )
 
             dist_df = pd.DataFrame(
-                [{"Class": to_cn_class(k), "Samples": v} for k, v in result.class_distribution.items()]
+                [{"类别": to_cn_class(k), "样本数": v} for k, v in result.class_distribution.items()]
             )
             st.dataframe(dist_df, use_container_width=True)
         except Exception as exc:
-            st.error(f"Training failed: {exc}")
+            st.error(f"训练失败：{exc}")
 
 
 def page_inference() -> None:
     if not can_write():
-        st.warning("Read-only role. Inference write-back is disabled.")
+        st.warning("当前角色为只读，不能写入评估结果。")
         return
 
-    st.subheader("Risk Inference")
+    st.subheader("风险评估")
     model = load_model()
     if model is None:
-        st.warning("No model found. Train model first.")
+        st.warning("未检测到模型，请先训练模型。")
         return
 
     subject_options = fetch_subject_options()
     if not subject_options:
-        st.warning("No subjects found.")
+        st.warning("暂无受检者。")
         return
 
-    selected_label = st.selectbox("Select Subject", list(subject_options.keys()), key="pred_subject")
+    selected_label = st.selectbox("选择受检者", list(subject_options.keys()), key="pred_subject")
     subject_id = subject_options[selected_label]
     rows = list_tests(subject_id=subject_id)
     if not rows:
-        st.info("No tests for this subject.")
+        st.info("该受检者暂无检验记录。")
         return
 
-    selected_test = st.selectbox("Select Test", [f"{r['id']} - {r['test_date']}" for r in rows])
+    selected_test = st.selectbox("选择检验记录", [f"{r['id']} - {r['test_date']}" for r in rows])
     test_id = int(selected_test.split(" - ")[0])
     current = get_test(test_id)
     if not current:
         return
 
-    if st.button("Run Inference", type="primary"):
+    if st.button("开始评估", type="primary"):
         sample_df = pd.DataFrame([{k: current.get(k) for k in FEATURE_COLUMNS}])
         try:
             pred = model.predict(sample_df)
@@ -501,78 +627,78 @@ def page_inference() -> None:
             )
             audit("inference", "ml", "evaluation", eval_id, {"test_id": test_id, "risk_level": risk_level})
 
-            st.success("Inference completed and saved.")
-            st.write(f"Predicted class: **{to_cn_class(predicted_class)}**")
-            st.write(f"Risk level: **{risk_level}**")
+            st.success("评估完成，结果已保存。")
+            st.write(f"预测类别：**{to_cn_class(predicted_class)}**")
+            st.write(f"风险等级：**{risk_level}**")
 
-            prob_df = pd.DataFrame([{"Class": to_cn_class(k), "Probability": float(v)} for k, v in probabilities.items()])
+            prob_df = pd.DataFrame([{"类别": to_cn_class(k), "概率": float(v)} for k, v in probabilities.items()])
             st.dataframe(prob_df, use_container_width=True)
 
             contrib_df = pd.DataFrame(
-                [{"Feature": k.upper(), "Contribution": v} for k, v in sorted(pred["feature_contribution"].items(), key=lambda x: x[1], reverse=True)]
-            ).set_index("Feature")
+                [{"指标": k.upper(), "贡献度": v} for k, v in sorted(pred["feature_contribution"].items(), key=lambda x: x[1], reverse=True)]
+            ).set_index("指标")
             st.bar_chart(contrib_df)
 
             if warning:
-                st.error("Warning: follow-up trend indicates possible elevated recurrence risk.")
+                st.error("预警：随访趋势提示复发风险可能升高。")
             else:
-                st.info("No follow-up warning triggered.")
+                st.info("当前未触发复发风险预警。")
             for note in notes:
                 st.write(f"- {note}")
         except Exception as exc:
-            st.error(f"Inference failed: {exc}")
+            st.error(f"评估失败：{exc}")
 
 
 def page_followup() -> None:
-    st.subheader("Follow-up Monitoring")
+    st.subheader("随访监测")
     subject_options = fetch_subject_options()
     if not subject_options:
-        st.warning("No subjects found.")
+        st.warning("暂无受检者。")
         return
 
-    selected_label = st.selectbox("Select Subject", list(subject_options.keys()), key="follow_subject")
+    selected_label = st.selectbox("选择受检者", list(subject_options.keys()), key="follow_subject")
     subject_id = subject_options[selected_label]
     df = get_followup_dataframe(subject_id)
     if df.empty:
-        st.info("No follow-up data.")
+        st.info("暂无随访数据。")
         return
 
     df["test_date"] = pd.to_datetime(df["test_date"], errors="coerce")
-    st.dataframe(df, use_container_width=True)
-    st.write("Marker Trends")
+    st.dataframe(_display_df(df), use_container_width=True)
+    st.write("六项指标趋势")
     st.line_chart(df.set_index("test_date")[FEATURE_COLUMNS])
 
     if {"normal_prob", "benign_prob", "malignant_prob"}.issubset(df.columns):
-        st.write("Probability Trends")
+        st.write("分类概率趋势")
         st.line_chart(df.set_index("test_date")[["normal_prob", "benign_prob", "malignant_prob"]].fillna(0.0))
 
     warning, notes = followup_warning_analysis(df)
     if warning:
-        st.error("Warning signal found in follow-up trend.")
+        st.error("随访提示：存在需要重点关注的风险信号。")
     else:
-        st.success("Follow-up trend currently stable.")
+        st.success("随访提示：当前趋势相对平稳。")
     for note in notes:
         st.write(f"- {note}")
 
 
 def page_report() -> None:
-    st.subheader("Report Export")
+    st.subheader("报告导出")
     subject_options = fetch_subject_options()
     if not subject_options:
-        st.warning("No subjects found.")
+        st.warning("暂无受检者。")
         return
 
-    selected_label = st.selectbox("Select Subject", list(subject_options.keys()), key="report_subject")
+    selected_label = st.selectbox("选择受检者", list(subject_options.keys()), key="report_subject")
     subject_id = subject_options[selected_label]
     subject = get_subject(subject_id)
     if not subject:
         return
     tests = list_tests(subject_id=subject_id)
     if not tests:
-        st.info("No tests for this subject.")
+        st.info("该受检者暂无检验记录。")
         return
 
-    selected_test = st.selectbox("Select Test", [f"{r['id']} - {r['test_date']}" for r in tests], key="report_test")
+    selected_test = st.selectbox("选择检验记录", [f"{r['id']} - {r['test_date']}" for r in tests], key="report_test")
     test_id = int(selected_test.split(" - ")[0])
     test_row = get_test(test_id)
     if not test_row:
@@ -580,11 +706,11 @@ def page_report() -> None:
 
     evaluation = get_latest_evaluation_for_test(test_id)
     if not evaluation:
-        st.warning("No evaluation found. Run inference first.")
+        st.warning("该记录尚未评估，请先在“风险评估”页面执行分析。")
         return
 
     followup_df = get_followup_dataframe(subject_id)
-    if st.button("Generate HTML + PDF Report", type="primary"):
+    if st.button("生成 HTML + PDF 报告", type="primary"):
         html_path = generate_report_html(
             subject=subject,
             test_row=test_row,
@@ -600,58 +726,60 @@ def page_report() -> None:
             output_dir=Path(REPORT_DIR),
         )
         audit("generate_report", "reports", "test", test_id, {"html": html_path.name, "pdf": pdf_path.name})
-        st.success(f"Reports generated: {html_path.name}, {pdf_path.name}")
+        st.success(f"报告生成完成：{html_path.name}，{pdf_path.name}")
 
         html_content = html_path.read_text(encoding="utf-8")
         pdf_content = pdf_path.read_bytes()
 
-        st.download_button("Download HTML", data=html_content.encode("utf-8"), file_name=html_path.name, mime="text/html")
-        st.download_button("Download PDF", data=pdf_content, file_name=pdf_path.name, mime="application/pdf")
+        st.download_button("下载 HTML 报告", data=html_content.encode("utf-8"), file_name=html_path.name, mime="text/html")
+        st.download_button("下载 PDF 报告", data=pdf_content, file_name=pdf_path.name, mime="application/pdf")
         st.components.v1.html(html_content, height=700, scrolling=True)
 
 
 def page_audit_logs() -> None:
     if not is_admin():
-        st.warning("Admin only.")
+        st.warning("仅管理员可查看审计日志。")
         return
 
-    st.subheader("Audit Logs")
+    st.subheader("审计日志")
     c1, c2, c3 = st.columns(3)
-    username = c1.text_input("Filter by username")
-    action = c2.text_input("Filter by action")
-    limit = c3.number_input("Rows", min_value=50, max_value=2000, value=300, step=50)
+    username = c1.text_input("按用户名筛选")
+    action = c2.text_input("按动作筛选")
+    limit = c3.number_input("显示条数", min_value=50, max_value=2000, value=300, step=50)
     rows = list_audit_logs(limit=int(limit), username=username, action=action)
     if not rows:
-        st.info("No logs found.")
+        st.info("暂无日志记录。")
         return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    st.dataframe(_display_df(pd.DataFrame(rows)), use_container_width=True)
 
 
 def page_user_admin() -> None:
     if not is_admin():
-        st.warning("Admin only.")
+        st.warning("仅管理员可管理用户。")
         return
 
-    st.subheader("User Administration")
+    st.subheader("用户管理")
     with st.form("create_user_form", clear_on_submit=True):
-        username = st.text_input("New username")
-        password = st.text_input("New password", type="password")
-        role = st.selectbox("Role", ["doctor", "viewer", "admin"])
-        submitted = st.form_submit_button("Create User")
+        username = st.text_input("新用户名")
+        password = st.text_input("新密码", type="password")
+        role = st.selectbox("角色", ["doctor", "viewer", "admin"], format_func=role_to_cn)
+        submitted = st.form_submit_button("创建用户")
     if submitted:
         try:
             user_id = create_user(username=username, password=password, role=role)
             audit("create_user", "users", "user", user_id, {"username": username, "role": role})
-            st.success(f"User created: {user_id}")
+            st.success(f"用户创建成功，ID={user_id}")
         except Exception as exc:
-            st.error(f"Create failed: {exc}")
+            st.error(f"创建失败：{exc}")
 
     rows = list_users()
     if not rows:
         return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    st.dataframe(_display_df(pd.DataFrame(rows)), use_container_width=True)
+
     options = {f"{r['id']} - {r['username']}": r["id"] for r in rows}
-    selected = st.selectbox("Select user", list(options.keys()))
+    selected = st.selectbox("选择用户", list(options.keys()))
     user_id = options[selected]
     target = next((r for r in rows if r["id"] == user_id), None)
     if target is None:
@@ -659,32 +787,36 @@ def page_user_admin() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        new_role = st.selectbox("Change role", ["admin", "doctor", "viewer"], index=["admin", "doctor", "viewer"].index(target["role"]))
-        if st.button("Update Role"):
+        new_role = st.selectbox(
+            "修改角色",
+            ["admin", "doctor", "viewer"],
+            index=["admin", "doctor", "viewer"].index(target["role"]),
+            format_func=role_to_cn,
+        )
+        if st.button("更新角色"):
             update_user_role(user_id, new_role)
             audit("update_user_role", "users", "user", user_id, {"role": new_role})
-            st.success("Role updated.")
+            st.success("角色已更新。")
             _rerun()
     with c2:
-        active_label = "Deactivate User" if int(target["is_active"]) else "Activate User"
+        active_label = "停用账号" if int(target["is_active"]) else "启用账号"
         if st.button(active_label):
             set_user_active(user_id, not bool(int(target["is_active"])))
             audit("toggle_user_active", "users", "user", user_id, {"is_active": int(not bool(int(target["is_active"])))})
-            st.success("Status updated.")
+            st.success("状态已更新。")
             _rerun()
 
     with st.form("reset_password_form"):
-        new_password = st.text_input("Reset password", type="password")
-        do_reset = st.form_submit_button("Reset Password")
+        new_password = st.text_input("重置密码", type="password")
+        do_reset = st.form_submit_button("确认重置")
     if do_reset:
         try:
             update_user_password(user_id, new_password)
             audit("reset_user_password", "users", "user", user_id)
-            st.success("Password reset completed.")
+            st.success("密码重置完成。")
         except Exception as exc:
-            st.error(f"Reset failed: {exc}")
+            st.error(f"重置失败：{exc}")
 
 
 if __name__ == "__main__":
     main()
-

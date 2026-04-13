@@ -1,2 +1,22 @@
-"""Core package for the breast risk assessment system."""
+"""medical_system 包说明
 
+这个包负责“业务核心逻辑”，前端页面（app.py）通过调用这里的函数/类完成工作。
+
+主要模块职责：
+1) config.py
+   管理全局路径、特征列名、类别映射等“系统常量”。
+2) auth.py
+   负责密码哈希与校验，不在数据库里保存明文密码。
+3) database.py
+   负责 SQLite 数据表初始化与所有 CRUD 操作（受检者、检验、评估、用户、审计日志）。
+4) preprocessing.py
+   负责模型前的数据预处理（异常值、缺失值、标准化、归一化）。
+5) modeling.py
+   负责模型训练、推理、保存/加载、指标计算和贡献度估计。
+6) risk.py
+   负责风险分层和随访预警规则。
+7) reporting.py
+   负责 HTML/PDF 报告生成。
+
+你可以把这个包理解成系统“后端服务层”。
+"""

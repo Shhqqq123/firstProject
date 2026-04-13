@@ -13,15 +13,34 @@
 
 ## Run
 
+Desktop mode (recommended):
+
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+python main.py
+```
+
+Web mode:
+
+```bash
+pip install -r requirements.txt
+python main.py --web
 ```
 
 Default admin account:
 
 - Username: `admin`
 - Password: `Admin@123456`
+
+## Build Windows EXE
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_desktop.ps1
+```
+
+Output:
+
+- `dist\BreastRiskDesktop\BreastRiskDesktop.exe`
 
 ## Data fields
 
@@ -46,6 +65,8 @@ Optional:
 ```text
 .
 ├── app.py
+├── desktop_app.py
+├── main.py
 ├── medical_system/
 │   ├── auth.py
 │   ├── config.py
@@ -55,9 +76,10 @@ Optional:
 │   ├── risk.py
 │   └── reporting.py
 ├── scripts/
-│   └── generate_sample_data.py
+│   ├── build_desktop.ps1
+│   ├── generate_sample_data.py
+│   └── run_simulated_pipeline.py
 ├── data/
 │   └── sample_input_template.csv
 └── requirements.txt
 ```
-

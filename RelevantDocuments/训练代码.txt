@@ -1,0 +1,339 @@
+#############健康和恶性病人代码################################
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    precision_recall_curve
+)
+import matplotlib.pyplot as plt
+import matplotlib
+import platform
+
+# --- 中文字体 ---
+system = platform.system()
+if system == "Windows":
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+elif system == "Darwin":
+    matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+else:
+    matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+
+# ==============================
+# 1. 读取数据 + 添加唯一ID + 标签转换
+# ==============================
+df = pd.read_excel('最终表-2602_恶性和健康.xlsx')
+df['unique_id'] = range(len(df))  # 关键：创建唯一ID
+
+
+# 将良恶性列的值进行转换：
+# 1 改为 1
+# 2 改为 0
+df['良恶性'] = df['良恶性'].replace({2: 0})
+
+
+label_col = '状态'  # 0=健康, 1=病人
+features = ['AKR1B10','CA19-9','NSE','CA125','CA153','CEA']
+print(f"✅ 特征: {features}")
+
+
+# ==============================
+# 2. 划分平衡验证集（基于ID）
+# ==============================
+df_pos = df[df[label_col] == 1]
+df_neg = df[df[label_col] == 0]
+
+val_size = int(0.2 * min(len(df_pos), len(df_neg)))
+
+# 采样验证集（记录ID）
+val_pos = df_pos.sample(n=val_size, random_state=42)
+val_neg = df_neg.sample(n=val_size, random_state=42)
+df_val = pd.concat([val_pos, val_neg]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+val_ids = set(df_val['unique_id'])
+
+
+
+# ==============================
+# 3. 训练池 = 非验证集ID
+# ==============================
+df_train = df[~df['unique_id'].isin(val_ids)].reset_index(drop=True)
+
+# 分离训练池
+df_train_pos = df_train[df_train[label_col] == 1]
+df_train_neg = df_train[df_train[label_col] == 0]
+n_pos_train = len(df_train_pos)
+
+print(f"\n✅ 划分完成:")
+print(f"  验证集: {len(df_val)} (阳性={len(val_pos)}, 阴性={len(val_neg)})")
+print(f"  训练集: {len(df_train)} (阳性={len(df_train_pos)}, 阴性={len(df_train_neg)})")
+
+# 验证无重复（基于ID）
+overlap_ids = set(df_val['unique_id']) & set(df_train['unique_id'])
+assert len(overlap_ids) == 0, f"❌ 重叠ID: {overlap_ids}"
+print("✅ 确认：无数据重叠（基于唯一ID）")
+
+# 删除ID列
+df_val = df_val.drop(columns=['unique_id'])
+df_train = df_train.drop(columns=['unique_id'])
+df_train_pos = df_train_pos.drop(columns=['unique_id'])
+df_train_neg = df_train_neg.drop(columns=['unique_id'])
+
+# ==============================
+# 4. 训练和评估
+# ==============================
+X_val = df_val[features].fillna(df_val[features].mean())
+y_val = df_val[label_col]
+
+N_MODELS = 60
+models = []
+single_metrics = []
+
+print(f"\n🤖 训练 60 个模型...")
+for i in range(N_MODELS):
+    # 采样阴性
+    if len(df_train_neg) >= len(df_train_pos):
+        neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=42 + i).reset_index(drop=True)
+    else:
+        neg_sampled = df_train_neg
+    
+    # 训练集
+    df_train = pd.concat([df_train_pos, neg_sampled], ignore_index=True).sample(frac=1, random_state=42 + i).reset_index(drop=True)
+    X_train = df_train[features].fillna(df_train[features].mean())
+    y_train = df_train[label_col]
+    
+    # 训练
+    rf = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_split=10, 
+                               min_samples_leaf=5, random_state=1000 + i, n_jobs=-1)
+    rf.fit(X_train, y_train)
+    models.append(rf)
+    
+    # 评估 (1=e性为正例)
+    y_prob = rf.predict_proba(X_val)[:, 1]
+    y_pred = (y_prob >= 0.5).astype(int)
+    
+    metrics = {
+        'Model': i + 1,
+        'AUC-ROC': round(roc_auc_score(y_val, y_prob), 4),
+        'AUC-PR': round(average_precision_score(y_val, y_prob, pos_label=1), 4),
+        'Accuracy': round(accuracy_score(y_val, y_pred), 4),
+        'Precision': round(precision_score(y_val, y_pred, pos_label=1, zero_division=0), 4),
+        'Recall': round(recall_score(y_val, y_pred, pos_label=1, zero_division=0), 4)
+    }
+    single_metrics.append(metrics)
+    print(f"  Model {i+1}: Recall={metrics['Recall']:.4f}")
+
+# ==============================
+# 5. 集成 & 保存 & 绘图
+# ==============================
+all_probs = np.mean([m.predict_proba(X_val)[:, 1] for m in models], axis=0)
+y_pred_ens = (all_probs >= 0.5).astype(int)
+
+ensemble_metrics = {
+    'Model': 'Ensemble',
+    'AUC-ROC': round(roc_auc_score(y_val, all_probs), 4),
+    'AUC-PR': round(average_precision_score(y_val, all_probs, pos_label=1), 4),
+    'Accuracy': round(accuracy_score(y_val, y_pred_ens), 4),
+    'Precision': round(precision_score(y_val, y_pred_ens, pos_label=1, zero_division=0), 4),
+    'Recall': round(recall_score(y_val, y_pred_ens, pos_label=1, zero_division=0), 4)
+}
+single_metrics.append(ensemble_metrics)
+
+# 保存
+result_df = pd.DataFrame(single_metrics)
+result_df.to_excel('RF_无泄露_评估结果_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和恶性2602.xlsx', index=False)
+
+# 绘图
+precision_vals, recall_vals, _ = precision_recall_curve(y_val, all_probs, pos_label=1)
+plt.figure(figsize=(8, 6))
+plt.plot(recall_vals, precision_vals, label=f'Ensemble (AUC={ensemble_metrics["AUC-PR"]:.3f})')
+plt.axhline(y=(y_val == 1).mean(), color='gray', linestyle='--', label=f'随机基线 (AUC={(y_val == 1).mean():.3f})')
+plt.xlabel('召回率 (Recall)'); plt.ylabel('精确率 (Precision)')
+plt.title('PR曲线（1=恶性为正例）'); plt.legend(); plt.grid(True, linestyle=':', alpha=0.7)
+plt.savefig('PR_Curve_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和恶性2602.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n🎯 集成 Recall:", ensemble_metrics['Recall'])
+print("✅ 完成！结果已保存:RF_无泄露_评估结果_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和恶性2602.xlsx。")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#####################健康和良性病人#################################
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    precision_recall_curve
+)
+import matplotlib.pyplot as plt
+import matplotlib
+import platform
+
+# --- 中文字体 ---
+system = platform.system()
+if system == "Windows":
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+elif system == "Darwin":
+    matplotlib.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+else:
+    matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+# ==============================
+# 1. 读取数据 + 添加唯一ID + 标签转换
+# ==============================
+df = pd.read_excel('最终表-2602_良性和健康.xlsx')
+df['unique_id'] = range(len(df))  # ←←← 关键：创建唯一ID
+
+# 将良恶性列的值进行转换：
+# 0 改为 1
+# 2 改为 0
+df['良恶性'] = df['良恶性'].replace({0: 1, 2: 0})
+
+label_col = '状态'  # 0=健康, 1=病人
+features = ['AKR1B10','CA19-9','NSE','CA125','CA153','CEA']
+print(f"✅ 特征: {features}")
+
+# ==============================
+# 2. 划分平衡验证集（基于ID）
+# ==============================
+df_pos = df[df[label_col] == 1]
+df_neg = df[df[label_col] == 0]
+
+val_size = int(0.2 * min(len(df_pos), len(df_neg)))
+
+# 采样验证集（记录ID）
+val_pos = df_pos.sample(n=val_size, random_state=42)
+val_neg = df_neg.sample(n=val_size, random_state=42)
+df_val = pd.concat([val_pos, val_neg]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+val_ids = set(df_val['unique_id'])
+
+# ==============================
+# 3. 训练池 = 非验证集ID
+# ==============================
+df_train_pool = df[~df['unique_id'].isin(val_ids)].reset_index(drop=True)
+
+# 分离训练池
+df_train_pos = df_train_pool[df_train_pool[label_col] == 1]
+df_train_neg = df_train_pool[df_train_pool[label_col] == 0]
+n_pos_train = len(df_train_pos)
+
+print(f"\n✅ 划分完成:")
+print(f"  验证集: {len(df_val)} (阳性={len(val_pos)}, 阴性={len(val_neg)})")
+print(f"  训练池: {len(df_train_pool)} (阳性={n_pos_train}, 阴性={len(df_train_neg)})")
+
+# 验证无泄露（基于ID）
+overlap_ids = set(df_val['unique_id']) & set(df_train_pool['unique_id'])
+assert len(overlap_ids) == 0, f"❌ 重叠ID: {overlap_ids}"
+print("✅ 确认：无数据泄露（基于唯一ID）")
+
+# 删除ID列
+df_val = df_val.drop(columns=['unique_id'])
+df_train_pool = df_train_pool.drop(columns=['unique_id'])
+df_train_pos = df_train_pos.drop(columns=['unique_id'])
+df_train_neg = df_train_neg.drop(columns=['unique_id'])
+
+# ==============================
+# 4. 训练和评估（后续代码不变）
+# ==============================
+X_val = df_val[features].fillna(df_val[features].mean())
+y_val = df_val[label_col]
+
+N_MODELS = 60
+models = []
+single_metrics = []
+
+print(f"\n🤖 训练 60 个模型...")
+for i in range(N_MODELS):
+    # 采样阴性
+    if len(df_train_neg) >= n_pos_train:
+        neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=42 + i).reset_index(drop=True)
+    else:
+        neg_sampled = df_train_neg
+    
+    # 训练集
+    df_train = pd.concat([df_train_pos, neg_sampled], ignore_index=True).sample(frac=1, random_state=42 + i).reset_index(drop=True)
+    X_train = df_train[features].fillna(df_train[features].mean())
+    y_train = df_train[label_col]
+    
+    # 训练
+    rf = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_split=10, 
+                               min_samples_leaf=5, random_state=1000 + i, n_jobs=-1)
+    rf.fit(X_train, y_train)
+    models.append(rf)
+    
+    # 评估 (1=良性为正例)
+    y_prob = rf.predict_proba(X_val)[:, 1]
+    y_pred = (y_prob >= 0.5).astype(int)
+    
+    metrics = {
+        'Model': i + 1,
+        'AUC-ROC': round(roc_auc_score(y_val, y_prob), 4),
+        'AUC-PR': round(average_precision_score(y_val, y_prob, pos_label=1), 4),
+        'Accuracy': round(accuracy_score(y_val, y_pred), 4),
+        'Precision': round(precision_score(y_val, y_pred, pos_label=1, zero_division=0), 4),
+        'Recall': round(recall_score(y_val, y_pred, pos_label=1, zero_division=0), 4)
+    }
+    single_metrics.append(metrics)
+    print(f"  Model {i+1}: Recall={metrics['Recall']:.4f}")
+
+# ==============================
+# 5. 集成 & 保存 & 绘图
+# ==============================
+all_probs = np.mean([m.predict_proba(X_val)[:, 1] for m in models], axis=0)
+y_pred_ens = (all_probs >= 0.5).astype(int)
+
+ensemble_metrics = {
+    'Model': 'Ensemble',
+    'AUC-ROC': round(roc_auc_score(y_val, all_probs), 4),
+    'AUC-PR': round(average_precision_score(y_val, all_probs, pos_label=1), 4),
+    'Accuracy': round(accuracy_score(y_val, y_pred_ens), 4),
+    'Precision': round(precision_score(y_val, y_pred_ens, pos_label=1, zero_division=0), 4),
+    'Recall': round(recall_score(y_val, y_pred_ens, pos_label=1, zero_division=0), 4)
+}
+single_metrics.append(ensemble_metrics)
+
+# 保存
+result_df = pd.DataFrame(single_metrics)
+result_df.to_excel('RF_无泄露_评估结果_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和良性2602.xlsx', index=False)
+
+# 绘图
+precision_vals, recall_vals, _ = precision_recall_curve(y_val, all_probs, pos_label=1)
+plt.figure(figsize=(8, 6))
+plt.plot(recall_vals, precision_vals, label=f'Ensemble (AUC={ensemble_metrics["AUC-PR"]:.3f})')
+plt.axhline(y=(y_val == 1).mean(), color='gray', linestyle='--', label=f'随机基线 (AUC={(y_val == 1).mean():.3f})')
+plt.xlabel('召回率 (Recall)'); plt.ylabel('精确率 (Precision)')
+plt.title('PR曲线（1=良性为正例）'); plt.legend(); plt.grid(True, linestyle=':', alpha=0.7)
+plt.savefig('PR_Curve_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和良性2602.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n🎯 集成 Recall:", ensemble_metrics['Recall'])
+print("✅ 完成！结果已保存:RF_无泄露_评估结果_AKR1B10,CA19-9,NSE,CA125,CA153,CEA_健康和良性2602.xlsx。")
+

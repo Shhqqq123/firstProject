@@ -4,6 +4,15 @@ import subprocess
 import sys
 
 
-if __name__ == "__main__":
-    subprocess.run([sys.executable, "-m", "streamlit", "run", "app.py"], check=False)
+def run_web() -> int:
+    return subprocess.call([sys.executable, "-m", "streamlit", "run", "app.py"])
 
+
+if __name__ == "__main__":
+    if "--web" in sys.argv:
+        raise SystemExit(run_web())
+    try:
+        from desktop_app import main as desktop_main
+    except Exception:
+        raise SystemExit(run_web())
+    raise SystemExit(desktop_main())
