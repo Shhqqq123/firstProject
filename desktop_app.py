@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import ctypes
 import os
 import socket
 import subprocess
@@ -15,6 +16,16 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 APP_PATH = BASE_DIR / "app.py"
 ICON_PATH = BASE_DIR / "assets" / "app_icon.ico"
+APP_USER_MODEL_ID = "Shq.BreastRiskDesktop.BreastCancerRisk.V1"
+
+
+def _set_windows_app_id() -> None:
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 def _find_free_port() -> int:
@@ -92,6 +103,7 @@ def _stop_process(proc: subprocess.Popen[bytes] | None) -> None:
 
 
 def run_desktop(debug: bool = False, port: int | None = None) -> int:
+    _set_windows_app_id()
     try:
         import webview
     except ImportError:

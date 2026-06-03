@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import streamlit as st
+from PIL import Image
 
 from medical_system.config import FEATURE_COLUMNS, MODEL_PATH, REPORT_DIR, ensure_directories
 from medical_system.database import (
@@ -43,9 +44,16 @@ from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn
 
 APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
 
+
+def _load_page_icon() -> Image.Image | str:
+    if APP_ICON_PATH.exists():
+        return Image.open(APP_ICON_PATH)
+    return ":hospital:"
+
+
 st.set_page_config(
     page_title="乳腺风险评估系统",
-    page_icon=str(APP_ICON_PATH) if APP_ICON_PATH.exists() else ":hospital:",
+    page_icon=_load_page_icon(),
     layout="wide",
 )
 ensure_directories()
@@ -622,6 +630,17 @@ def main() -> None:
 
     user = current_user()
     assert user is not None
+
+    if APP_ICON_PATH.exists():
+        st.sidebar.image(str(APP_ICON_PATH), width=74)
+        st.sidebar.markdown(
+            """
+            <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:-4px 0 14px;">
+                乳腺风险评估系统
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     username_display = html.escape(str(user["username"]))
     role_display = html.escape(role_to_cn(str(user["role"])))
