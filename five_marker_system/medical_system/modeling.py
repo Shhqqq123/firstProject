@@ -448,11 +448,29 @@ class BreastRiskModel:
                 n_jobs=-1,
             )
             rf.fit(X_train, y_train)
-            models.append(rf)
-            all_probs.append(self._predict_model_proba(rf, X_val))
+
+            et = ExtraTreesClassifier(
+                n_estimators=160,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=2,
+                max_features="sqrt",
+                class_weight={0: self.benign_negative_class_weight, 1: self.benign_positive_class_weight},
+                random_state=3000 + i,
+                n_jobs=-1,
+            )
+            et.fit(X_train, y_train)
+
+            blend_model = {
+                "type": "mean_model_blend",
+                "models": [rf, et],
+                "weights": [0.55, 0.45],
+            }
+            models.append(blend_model)
+            all_probs.append(self._predict_model_proba(blend_model, X_val))
 
         ensemble_prob = np.mean(all_probs, axis=0)
-        threshold = 0.5
+        threshold = self._find_best_threshold_benign(y_val, ensemble_prob)
         y_pred = (ensemble_prob >= threshold).astype(int)
 
         metrics = {
@@ -466,7 +484,7 @@ class BreastRiskModel:
             "models": models,
             "metrics": metrics,
             "feature_importance": feature_importance,
-            "model_type": "random_forest_ensemble",
+            "model_type": "rf_extra_trees_ensemble",
             "threshold": float(threshold),
         }
 
@@ -478,7 +496,7 @@ class BreastRiskModel:
         2) Otherwise, optimize precision under recall floor.
         3) Fallback to max precision if recall floor cannot be satisfied.
         """
-        feasible_best, _ = self._search_threshold_targets(
+        feasible_best, balanced_best = self._search_threshold_targets(
             y_true=y_true,
             y_prob=y_prob,
             target=self.metric_target,
@@ -486,12 +504,9 @@ class BreastRiskModel:
         )
         if feasible_best is not None:
             return float(feasible_best["threshold"])
-        return self._choose_threshold_for_precision(
-            y_true=y_true,
-            y_prob=y_prob,
-            min_recall=self.benign_min_recall_for_tuning,
-            min_pred_positive=self.benign_min_pred_positive,
-        )
+        if balanced_best is not None:
+            return float(balanced_best["threshold"])
+        return 0.5
 
     def _choose_threshold_for_precision(
         self,
@@ -675,6 +690,17 @@ class BreastRiskModel:
             rf_prob = self._predict_model_proba(model["rf_model"], X)
             return (et_weight * et_prob + rf_weight * rf_prob) / total_weight
 
+        if isinstance(model, dict) and model.get("type") == "mean_model_blend":
+            sub_models = list(model.get("models", []))
+            weights = np.asarray(model.get("weights", []), dtype=float)
+            if not sub_models:
+                raise ValueError("融合模型缺少子模型。")
+            if len(weights) != len(sub_models) or float(np.sum(weights)) <= 0:
+                weights = np.ones(len(sub_models), dtype=float)
+            weights = weights / float(np.sum(weights))
+            probs = [self._predict_model_proba(sub_model, X) for sub_model in sub_models]
+            return np.average(np.vstack(probs), axis=0, weights=weights)
+
         proba = model.predict_proba(X)
         if isinstance(proba, list):
             proba = np.asarray(proba)
@@ -755,6 +781,12 @@ class BreastRiskModel:
             vectors = []
             vectors.extend(self._feature_importance_vectors(model.get("et_model")))
             vectors.extend(self._feature_importance_vectors(model.get("rf_model")))
+            return vectors
+
+        if isinstance(model, dict) and model.get("type") == "mean_model_blend":
+            vectors = []
+            for sub_model in model.get("models", []):
+                vectors.extend(self._feature_importance_vectors(sub_model))
             return vectors
 
         if hasattr(model, "feature_importances_"):
