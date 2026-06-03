@@ -72,7 +72,7 @@ def generate_report_html(
   </style>
 </head>
 <body>
-  <h1>基于6项肿瘤标志物与集成学习的乳腺全流程风险评估系统 V1.0</h1>
+  <h1>基于六项肿瘤标志物的乳腺癌诊断评估系统 V1.0</h1>
   <div class="meta">生成时间：{now}</div>
   <h2>1. 受检者信息</h2>
   <table>
@@ -157,7 +157,7 @@ def generate_report_pdf(
     }
     feature_importance = _parse_feature_importance(evaluation_row.get("feature_importance_json"))
 
-    write_line("基于6项肿瘤标志物与集成学习的乳腺全流程风险评估系统 V1.0", size=14, step_mm=8)
+    write_line("基于六项肿瘤标志物的乳腺癌诊断评估系统 V1.0", size=14, step_mm=8)
     write_line(f"生成时间: {now}")
     write_line("")
     write_line("1. 受检者信息", size=12)
@@ -208,4 +208,3 @@ def _parse_feature_importance(value: Any) -> dict[str, float]:
     except json.JSONDecodeError:
         pass
     return {c: 0.0 for c in FEATURE_COLUMNS}
-

@@ -8,10 +8,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_recall_curve, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import train_test_split
 
-from .config import CLASS_ORDER, FEATURE_COLUMNS, LABEL_COLUMN
-from .preprocessing import clip_outliers_iqr
+from .config import FEATURE_COLUMNS, LABEL_COLUMN
+
+try:
+    from catboost import CatBoostClassifier
+except Exception:  # pragma: no cover - optional dependency
+    CatBoostClassifier = None
 
 
 @dataclass
@@ -21,32 +26,37 @@ class TrainResult:
 
 
 class BreastRiskModel:
-    """按用户训练代码思路实现的后端模型。
+    """Two-expert risk model.
 
-    核心逻辑：
-    1) 两个二分类任务
-       - 任务A: 正常(normal) vs 恶性(malignant)
-       - 任务B: 正常(normal) vs 良性(benign)
-    2) 每个任务训练 60 个随机森林子模型并集成平均概率
-    3) 推理时把两个任务概率合成为三分类概率:
-       - malignant = p_m
-       - benign = (1 - p_m) * p_b
-       - normal = (1 - p_m) * (1 - p_b)
+    - Malignant task: normal vs malignant, prefers CatBoost when available.
+    - Benign task: normal vs benign, uses RandomForest ensemble.
+    - Final prediction: combine two binary probabilities into three-class probabilities.
     """
 
     def __init__(self, random_state: int = 42, n_models: int = 60) -> None:
         self.random_state = random_state
         self.n_models = n_models
-        self.malignant_models: list[RandomForestClassifier] = []
-        self.benign_models: list[RandomForestClassifier] = []
+        self.malignant_models: list[Any] = []
+        self.benign_models: list[Any] = []
+        self.malignant_model_type: str = "catboost"
+        self.benign_model_type: str = "random_forest"
+        self.malignant_threshold: float = 0.5
+        self.benign_threshold: float = 0.5
         self.global_feature_importance: dict[str, float] = {}
         self.train_metrics: dict[str, float] = {}
+        self.metric_target: float = 0.80
+        # Benign task tuning parameters (aligned with your standalone script).
+        self.benign_min_recall_for_tuning: float = 0.55
+        self.benign_min_pred_positive: int = 8
+        self.benign_negative_class_weight: float = 1.35
+        self.benign_positive_class_weight: float = 1.0
+        # Cap healthy samples for the benign expert so larger latest tables do not skew it.
+        self.benign_negative_max_ratio: float = 3.0
 
     def train(self, df: pd.DataFrame, test_size: float = 0.2) -> TrainResult:
-        _ = test_size  # 为兼容旧接口保留入参
+        _ = test_size  # keep signature compatible
         data = self._prepare_training_df(df)
-        dist = data[LABEL_COLUMN].value_counts().to_dict()
-        class_distribution = {k: int(v) for k, v in dist.items()}
+        class_distribution = {k: int(v) for k, v in data[LABEL_COLUMN].value_counts().to_dict().items()}
 
         if class_distribution.get("normal", 0) < 20:
             raise ValueError("正常样本不足，至少需要20条。")
@@ -55,37 +65,39 @@ class BreastRiskModel:
         if class_distribution.get("malignant", 0) < 20:
             raise ValueError("恶性样本不足，至少需要20条。")
 
-        malignant_result = self._train_binary_ensemble(
+        malignant_result = self._train_binary_task(
             data=data,
             positive_label="malignant",
             negative_label="normal",
             task_name="正常vs恶性",
+            preferred_model="catboost",
         )
-        benign_result = self._train_binary_ensemble(
+        benign_result = self._train_binary_task(
             data=data,
             positive_label="benign",
             negative_label="normal",
             task_name="正常vs良性",
+            preferred_model="random_forest",
         )
 
         self.malignant_models = malignant_result["models"]
         self.benign_models = benign_result["models"]
-
-        # 聚合两个任务特征重要性作为全局解释性权重
+        self.malignant_model_type = malignant_result["model_type"]
+        self.benign_model_type = benign_result["model_type"]
+        self.malignant_threshold = float(malignant_result["threshold"])
+        self.benign_threshold = float(benign_result["threshold"])
         self.global_feature_importance = self._merge_feature_importance(
-            malignant_result["feature_importance"], benign_result["feature_importance"]
+            malignant_result["feature_importance"],
+            benign_result["feature_importance"],
         )
 
-        # 页面主指标：取两个任务的平均值，便于单卡片展示
         metrics = {
             "auc": float(np.mean([malignant_result["metrics"]["auc_roc"], benign_result["metrics"]["auc_roc"]])),
             "precision": float(
                 np.mean([malignant_result["metrics"]["precision"], benign_result["metrics"]["precision"]])
             ),
             "recall": float(np.mean([malignant_result["metrics"]["recall"], benign_result["metrics"]["recall"]])),
-            "accuracy": float(
-                np.mean([malignant_result["metrics"]["accuracy"], benign_result["metrics"]["accuracy"]])
-            ),
+            "accuracy": float(np.mean([malignant_result["metrics"]["accuracy"], benign_result["metrics"]["accuracy"]])),
             "malignant_auc": float(malignant_result["metrics"]["auc_roc"]),
             "malignant_precision": float(malignant_result["metrics"]["precision"]),
             "malignant_recall": float(malignant_result["metrics"]["recall"]),
@@ -100,20 +112,56 @@ class BreastRiskModel:
         if not self.malignant_models or not self.benign_models:
             raise ValueError("模型尚未训练或加载。")
 
-        data = sample_df.copy()
-        data = data[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
-        data = data.fillna(data.mean(numeric_only=True))
+        data = _prepare_feature_frame(sample_df)
+        p_malignant_raw = self._predict_binary_probability(self.malignant_models, data)
+        p_benign_raw = self._predict_binary_probability(self.benign_models, data)
 
-        p_malignant = float(np.mean([m.predict_proba(data)[:, 1][0] for m in self.malignant_models]))
-        p_benign_binary = float(np.mean([m.predict_proba(data)[:, 1][0] for m in self.benign_models]))
+        # Two-stage hard gating keeps the benign expert from being suppressed
+        # by the malignant expert's probability.
+        if p_malignant_raw >= self.malignant_threshold:
+            predicted_class = "malignant"
+        elif p_benign_raw >= self.benign_threshold:
+            predicted_class = "benign"
+        else:
+            predicted_class = "normal"
 
-        # 由两个二分类任务概率合成三分类概率（总和为1）
-        malignant_prob = p_malignant
-        benign_prob = (1.0 - p_malignant) * p_benign_binary
-        normal_prob = (1.0 - p_malignant) * (1.0 - p_benign_binary)
-        probs = {"normal": normal_prob, "benign": benign_prob, "malignant": malignant_prob}
+        m = float(np.clip(p_malignant_raw, 0.0, 1.0))
+        b = float(np.clip(p_benign_raw, 0.0, 1.0))
+        if predicted_class == "malignant":
+            probs = {
+                "malignant": m,
+                "benign": (1.0 - m) * b,
+                "normal": (1.0 - m) * (1.0 - b),
+            }
+        elif predicted_class == "benign":
+            m_soft = 0.5 * m  # malignant gate failed, so downweight malignant branch
+            probs = {
+                "malignant": m_soft,
+                "benign": (1.0 - m_soft) * b,
+                "normal": (1.0 - m_soft) * (1.0 - b),
+            }
+        else:
+            m_soft = 0.5 * m
+            b_soft = 0.5 * b
+            probs = {
+                "malignant": m_soft,
+                "benign": b_soft,
+                "normal": max(0.0, 1.0 - m_soft - b_soft),
+            }
 
-        predicted_class = max(probs, key=probs.get)
+        total = float(sum(probs.values()))
+        if total <= 0:
+            probs = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
+        else:
+            probs = {k: float(v / total) for k, v in probs.items()}
+
+        # Ensure the displayed probability ordering is consistent with gated decision.
+        max_other = max(v for k, v in probs.items() if k != predicted_class)
+        if probs[predicted_class] <= max_other:
+            probs[predicted_class] = max_other + 1e-6
+            total = float(sum(probs.values()))
+            probs = {k: float(v / total) for k, v in probs.items()}
+
         confidence = float(probs[predicted_class])
         contribution = self._sample_contribution(data.iloc[0])
 
@@ -129,10 +177,15 @@ class BreastRiskModel:
             raise ValueError("模型尚未训练，无法保存。")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "version": 2,
             "random_state": self.random_state,
             "n_models": self.n_models,
             "malignant_models": self.malignant_models,
             "benign_models": self.benign_models,
+            "malignant_model_type": self.malignant_model_type,
+            "benign_model_type": self.benign_model_type,
+            "malignant_threshold": self.malignant_threshold,
+            "benign_threshold": self.benign_threshold,
             "global_feature_importance": self.global_feature_importance,
             "train_metrics": self.train_metrics,
         }
@@ -141,12 +194,19 @@ class BreastRiskModel:
     @classmethod
     def load(cls, path: Path) -> "BreastRiskModel":
         payload = joblib.load(path)
+        if isinstance(payload, cls):  # backward compatibility for direct dumps
+            return payload
+
         model = cls(
             random_state=int(payload.get("random_state", 42)),
             n_models=int(payload.get("n_models", 60)),
         )
         model.malignant_models = payload.get("malignant_models", [])
         model.benign_models = payload.get("benign_models", [])
+        model.malignant_model_type = str(payload.get("malignant_model_type", "random_forest"))
+        model.benign_model_type = str(payload.get("benign_model_type", "random_forest"))
+        model.malignant_threshold = float(payload.get("malignant_threshold", 0.5))
+        model.benign_threshold = float(payload.get("benign_threshold", 0.5))
         model.global_feature_importance = payload.get("global_feature_importance", {})
         model.train_metrics = payload.get("train_metrics", {})
         return model
@@ -161,32 +221,108 @@ class BreastRiskModel:
             readable_missing = ["ca19-9" if col == "ca19_9" else col for col in missing]
             raise ValueError(f"训练数据缺少字段: {', '.join(readable_missing)}")
 
-        data = data[required]
+        data = data[required].copy()
         data[LABEL_COLUMN] = data[LABEL_COLUMN].map(_normalize_label)
-        data = data.dropna(subset=[LABEL_COLUMN])
-        data = clip_outliers_iqr(data, FEATURE_COLUMNS)
+        data = data.dropna(subset=[LABEL_COLUMN]).reset_index(drop=True)
         return data
 
-    def _train_binary_ensemble(
+    def _train_binary_task(
+        self,
+        data: pd.DataFrame,
+        positive_label: str,
+        negative_label: str,
+        task_name: str,
+        preferred_model: str,
+    ) -> dict[str, Any]:
+        if preferred_model == "random_forest":
+            return self._train_random_forest_task(
+                data=data,
+                positive_label=positive_label,
+                negative_label=negative_label,
+                task_name=task_name,
+            )
+
+        subset = data[data[LABEL_COLUMN].isin([positive_label, negative_label])].copy().reset_index(drop=True)
+        subset["binary_label"] = (subset[LABEL_COLUMN] == positive_label).astype(int)
+        if len(subset) < 20:
+            raise ValueError(f"{task_name}样本太少，无法训练。")
+
+        train_df, val_df = train_test_split(
+            subset,
+            test_size=max(0.2, 1 / len(subset)),
+            random_state=self.random_state,
+            stratify=subset["binary_label"],
+        )
+
+        X_val = _prepare_feature_frame(val_df)
+        y_val = val_df["binary_label"].astype(int).to_numpy()
+        X_train_full = _prepare_feature_frame(train_df)
+        y_train_full = train_df["binary_label"].astype(int).to_numpy()
+
+        models: list[Any] = []
+        all_probs: list[np.ndarray] = []
+        train_rounds = 1 if preferred_model == "catboost" else self.n_models
+
+        for i in range(train_rounds):
+            X_train, y_train = self._bootstrap_training_set(
+                X_train_full,
+                y_train_full,
+                random_seed=self.random_state + i,
+            )
+            model = self._build_model(preferred_model=preferred_model, seed=1000 + i)
+            model.fit(X_train, y_train)
+            models.append(model)
+            all_probs.append(self._predict_model_proba(model, X_val))
+
+        ensemble_prob = np.mean(all_probs, axis=0)
+        threshold = 0.5
+        y_pred = (ensemble_prob >= threshold).astype(int)
+
+        metrics = {
+            "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "accuracy": float(accuracy_score(y_val, y_pred)),
+            "precision": float(precision_score(y_val, y_pred, zero_division=0)),
+            "recall": float(recall_score(y_val, y_pred, zero_division=0)),
+        }
+
+        feature_importance = self._average_feature_importance(models)
+        model_type = "catboost" if preferred_model == "catboost" else "random_forest_ensemble"
+
+        return {
+            "models": models,
+            "metrics": metrics,
+            "feature_importance": feature_importance,
+            "model_type": model_type,
+            "threshold": float(threshold),
+        }
+
+    def _train_random_forest_task(
         self,
         data: pd.DataFrame,
         positive_label: str,
         negative_label: str,
         task_name: str,
     ) -> dict[str, Any]:
+        """RF ensemble training aligned with your standalone script style.
+
+        - Balanced validation set (same number of pos/neg)
+        - Majority-class downsampling for each ensemble round
+        """
         subset = data[data[LABEL_COLUMN].isin([positive_label, negative_label])].copy().reset_index(drop=True)
         subset["unique_id"] = np.arange(len(subset))
         subset["binary_label"] = (subset[LABEL_COLUMN] == positive_label).astype(int)
 
-        df_pos = subset[subset["binary_label"] == 1]
-        df_neg = subset[subset["binary_label"] == 0]
-
+        df_pos = subset[subset["binary_label"] == 1].copy().reset_index(drop=True)
+        df_neg = subset[subset["binary_label"] == 0].copy().reset_index(drop=True)
         if len(df_pos) < 10 or len(df_neg) < 10:
             raise ValueError(f"{task_name}样本不足，至少每类10条。")
 
+        max_neg = int(max(len(df_pos), len(df_pos) * self.benign_negative_max_ratio))
+        if len(df_neg) > max_neg:
+            df_neg = df_neg.sample(n=max_neg, random_state=self.random_state).reset_index(drop=True)
+
         val_size = int(0.2 * min(len(df_pos), len(df_neg)))
         val_size = max(val_size, 1)
-
         val_pos = df_pos.sample(n=val_size, random_state=self.random_state)
         val_neg = df_neg.sample(n=val_size, random_state=self.random_state)
         df_val = pd.concat([val_pos, val_neg], ignore_index=True).sample(frac=1.0, random_state=self.random_state)
@@ -200,17 +336,16 @@ class BreastRiskModel:
         if n_pos_train < 5 or len(df_train_neg) < 5:
             raise ValueError(f"{task_name}训练集太小，无法稳定训练。")
 
-        X_val = df_val[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
-        X_val = X_val.fillna(X_val.mean(numeric_only=True))
-        y_val = df_val["binary_label"].astype(int)
+        X_val = _prepare_feature_frame(df_val)
+        y_val = df_val["binary_label"].astype(int).to_numpy()
 
-        models: list[RandomForestClassifier] = []
+        models: list[Any] = []
         all_probs: list[np.ndarray] = []
-
         for i in range(self.n_models):
-            # 按用户代码思路：负类下采样到与正类一样多
             if len(df_train_neg) >= n_pos_train:
-                neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=self.random_state + i).reset_index(drop=True)
+                neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=self.random_state + i).reset_index(
+                    drop=True
+                )
             else:
                 neg_sampled = df_train_neg.copy().reset_index(drop=True)
 
@@ -219,48 +354,296 @@ class BreastRiskModel:
                 .sample(frac=1.0, random_state=self.random_state + i)
                 .reset_index(drop=True)
             )
-
-            X_train = df_train[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
-            X_train = X_train.fillna(X_train.mean(numeric_only=True))
-            y_train = df_train["binary_label"].astype(int)
+            X_train = _prepare_feature_frame(df_train)
+            y_train = df_train["binary_label"].astype(int).to_numpy()
 
             rf = RandomForestClassifier(
-                n_estimators=100,
+                n_estimators=120,
                 max_depth=5,
                 min_samples_split=10,
                 min_samples_leaf=5,
+                class_weight={0: self.benign_negative_class_weight, 1: self.benign_positive_class_weight},
                 random_state=1000 + i,
-                n_jobs=1,
+                n_jobs=-1,
             )
             rf.fit(X_train, y_train)
             models.append(rf)
-            all_probs.append(rf.predict_proba(X_val)[:, 1])
+            all_probs.append(self._predict_model_proba(rf, X_val))
 
         ensemble_prob = np.mean(all_probs, axis=0)
-        y_pred = (ensemble_prob >= 0.5).astype(int)
+        threshold = 0.5
+        y_pred = (ensemble_prob >= threshold).astype(int)
+
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
         }
-
-        fi_vectors = [m.feature_importances_ for m in models if hasattr(m, "feature_importances_")]
-        fi_avg = np.mean(fi_vectors, axis=0) if fi_vectors else np.ones(len(FEATURE_COLUMNS))
-        fi_sum = float(np.sum(fi_avg))
-        if fi_sum <= 0:
-            feature_importance = {name: 1.0 / len(FEATURE_COLUMNS) for name in FEATURE_COLUMNS}
-        else:
-            feature_importance = {name: float(v / fi_sum) for name, v in zip(FEATURE_COLUMNS, fi_avg)}
-
+        feature_importance = self._average_feature_importance(models)
         return {
             "models": models,
             "metrics": metrics,
             "feature_importance": feature_importance,
+            "model_type": "random_forest_ensemble",
+            "threshold": float(threshold),
         }
 
+    def _find_best_threshold_benign(self, y_true: np.ndarray, y_prob: np.ndarray) -> float:
+        """Threshold strategy aligned with the standalone benign script.
+
+        Priority:
+        1) If there exists a threshold with Precision/Recall/Accuracy all >= target, use the best one.
+        2) Otherwise, optimize precision under recall floor.
+        3) Fallback to max precision if recall floor cannot be satisfied.
+        """
+        feasible_best, _ = self._search_threshold_targets(
+            y_true=y_true,
+            y_prob=y_prob,
+            target=self.metric_target,
+            min_pred_positive=self.benign_min_pred_positive,
+        )
+        if feasible_best is not None:
+            return float(feasible_best["threshold"])
+        return self._choose_threshold_for_precision(
+            y_true=y_true,
+            y_prob=y_prob,
+            min_recall=self.benign_min_recall_for_tuning,
+            min_pred_positive=self.benign_min_pred_positive,
+        )
+
+    def _choose_threshold_for_precision(
+        self,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        min_recall: float = 0.55,
+        min_pred_positive: int = 8,
+    ) -> float:
+        precision_vals, recall_vals, thresholds = precision_recall_curve(y_true, y_prob, pos_label=1)
+        best_thr = 0.5
+        best_precision = -1.0
+        best_recall = -1.0
+
+        for idx, thr in enumerate(thresholds):
+            p = float(precision_vals[idx + 1])
+            r = float(recall_vals[idx + 1])
+            pred_pos = int((y_prob >= thr).sum())
+            if pred_pos < min_pred_positive:
+                continue
+            if r >= min_recall and (p > best_precision or (p == best_precision and r > best_recall)):
+                best_thr = float(thr)
+                best_precision = p
+                best_recall = r
+
+        if best_precision < 0:
+            for idx, thr in enumerate(thresholds):
+                p = float(precision_vals[idx + 1])
+                r = float(recall_vals[idx + 1])
+                pred_pos = int((y_prob >= thr).sum())
+                if pred_pos < min_pred_positive:
+                    continue
+                if p > best_precision or (p == best_precision and r > best_recall):
+                    best_thr = float(thr)
+                    best_precision = p
+                    best_recall = r
+        return best_thr
+
+    def _search_threshold_targets(
+        self,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        target: float = 0.80,
+        min_pred_positive: int = 1,
+    ) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+        candidate_thresholds = np.unique(y_prob)
+        candidate_thresholds = np.concatenate(([0.0], candidate_thresholds, [1.0]))
+
+        feasible_best = None
+        balanced_best = None
+        for thr in candidate_thresholds:
+            point = self._compute_point_metrics(y_true, y_prob, float(thr))
+            if point["pred_pos"] < min_pred_positive:
+                continue
+
+            meets_target = (
+                point["precision"] >= target and point["recall"] >= target and point["accuracy"] >= target
+            )
+            if meets_target:
+                if feasible_best is None:
+                    feasible_best = point
+                else:
+                    if (
+                        point["avg_pr_acc"] > feasible_best["avg_pr_acc"]
+                        or (
+                            point["avg_pr_acc"] == feasible_best["avg_pr_acc"]
+                            and point["min_pr_acc"] > feasible_best["min_pr_acc"]
+                        )
+                    ):
+                        feasible_best = point
+
+            if balanced_best is None:
+                balanced_best = point
+            else:
+                if (
+                    point["min_pr_acc"] > balanced_best["min_pr_acc"]
+                    or (
+                        point["min_pr_acc"] == balanced_best["min_pr_acc"]
+                        and point["avg_pr_acc"] > balanced_best["avg_pr_acc"]
+                    )
+                ):
+                    balanced_best = point
+        return feasible_best, balanced_best
+
+    def _compute_point_metrics(self, y_true: np.ndarray, y_prob: np.ndarray, threshold: float) -> dict[str, float]:
+        y_pred = (y_prob >= threshold).astype(int)
+        precision = precision_score(y_true, y_pred, pos_label=1, zero_division=0)
+        recall = recall_score(y_true, y_pred, pos_label=1, zero_division=0)
+        accuracy = accuracy_score(y_true, y_pred)
+        return {
+            "threshold": float(threshold),
+            "precision": float(precision),
+            "recall": float(recall),
+            "accuracy": float(accuracy),
+            "pred_pos": float(int(y_pred.sum())),
+            "min_pr_acc": float(min(precision, recall, accuracy)),
+            "avg_pr_acc": float((precision + recall + accuracy) / 3.0),
+        }
+
+    def _build_model(self, preferred_model: str, seed: int) -> Any:
+        if preferred_model == "catboost":
+            if CatBoostClassifier is None:
+                raise RuntimeError("未安装catboost，无法训练“健康vs恶性”专家模型。请先安装 catboost。")
+            return CatBoostClassifier(
+                iterations=300,
+                depth=4,
+                learning_rate=0.05,
+                loss_function="Logloss",
+                eval_metric="AUC",
+                auto_class_weights="Balanced",
+                random_seed=seed,
+                verbose=False,
+                allow_writing_files=False,
+            )
+
+        return RandomForestClassifier(
+            n_estimators=240,
+            max_depth=6,
+            min_samples_split=8,
+            min_samples_leaf=3,
+            max_features="sqrt",
+            class_weight="balanced_subsample",
+            random_state=seed,
+            n_jobs=1,
+        )
+
+    def _bootstrap_training_set(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        random_seed: int,
+    ) -> tuple[pd.DataFrame, np.ndarray]:
+        rng = np.random.default_rng(random_seed)
+        pos_idx = np.where(y == 1)[0]
+        neg_idx = np.where(y == 0)[0]
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            return X.copy(), y.copy()
+
+        target_size = max(len(pos_idx), len(neg_idx))
+        pos_sample = rng.choice(pos_idx, size=target_size, replace=True)
+        neg_sample = rng.choice(neg_idx, size=target_size, replace=True)
+        sampled_idx = np.concatenate([pos_sample, neg_sample])
+        rng.shuffle(sampled_idx)
+        X_sampled = X.iloc[sampled_idx].reset_index(drop=True)
+        y_sampled = y[sampled_idx]
+        return X_sampled, y_sampled
+
+    def _predict_model_proba(self, model: Any, X: pd.DataFrame) -> np.ndarray:
+        proba = model.predict_proba(X)
+        if isinstance(proba, list):
+            proba = np.asarray(proba)
+        return np.asarray(proba)[:, 1]
+
+    def _predict_binary_probability(self, models: list[Any], X: pd.DataFrame) -> float:
+        probs = [self._predict_model_proba(model, X)[0] for model in models]
+        return float(np.mean(probs))
+
+    def _find_best_threshold(self, y_true: np.ndarray, y_prob: np.ndarray, target_min: float = 0.80) -> float:
+        # Use probability-driven candidates instead of a coarse fixed grid,
+        # so thresholds like 0.4858 can be discovered.
+        prob = np.asarray(y_prob, dtype=float)
+        unique_prob = np.unique(np.clip(prob, 1e-8, 1 - 1e-8))
+        if unique_prob.size == 0:
+            return 0.5
+
+        mids = (unique_prob[:-1] + unique_prob[1:]) / 2.0 if unique_prob.size > 1 else np.array([], dtype=float)
+        boundary = np.array([unique_prob[0], unique_prob[-1]], dtype=float)
+        dense = np.linspace(max(0.01, float(unique_prob.min()) - 0.05), min(0.99, float(unique_prob.max()) + 0.05), 300)
+        candidates = np.unique(np.concatenate([unique_prob, mids, boundary, dense, np.array([0.5])]))
+        candidates = candidates[(candidates > 0) & (candidates < 1)]
+
+        feasible: list[tuple[float, float, float, float]] = []
+        for thr in candidates:
+            y_pred = (y_prob >= thr).astype(int)
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            accuracy = accuracy_score(y_true, y_pred)
+            if precision >= target_min and recall >= target_min and accuracy >= target_min:
+                feasible.append((float(thr), float(precision), float(recall), float(accuracy)))
+
+        # 优先选三指标同时达标的阈值，按“最弱指标最大化”排序
+        if feasible:
+            feasible.sort(key=lambda x: (min(x[1], x[2], x[3]), (x[1] + x[2] + x[3]) / 3.0), reverse=True)
+            return feasible[0][0]
+
+        best_thr = 0.5
+        best_score = -1.0
+        for thr in candidates:
+            y_pred = (y_prob >= thr).astype(int)
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            accuracy = accuracy_score(y_true, y_pred)
+            score = min(precision, recall, accuracy)
+            if score > best_score:
+                best_score = score
+                best_thr = float(thr)
+        return best_thr
+
+    def _apply_threshold_calibration(self, prob: float, threshold: float) -> float:
+        """Map task-specific threshold to decision midpoint 0.5.
+
+        This keeps ranking monotonic while making tuned thresholds effective in fusion.
+        """
+        p = float(np.clip(prob, 1e-8, 1.0 - 1e-8))
+        t = float(np.clip(threshold, 1e-6, 1.0 - 1e-6))
+        if p <= t:
+            return float(0.5 * (p / t))
+        return float(0.5 + 0.5 * ((p - t) / (1.0 - t)))
+
+    def _average_feature_importance(self, models: list[Any]) -> dict[str, float]:
+        vectors: list[np.ndarray] = []
+        for model in models:
+            if hasattr(model, "feature_importances_"):
+                vectors.append(np.asarray(model.feature_importances_, dtype=float))
+                continue
+            if hasattr(model, "get_feature_importance"):
+                try:
+                    vectors.append(np.asarray(model.get_feature_importance(), dtype=float))
+                except Exception:
+                    continue
+
+        if not vectors:
+            return {name: 1.0 / len(FEATURE_COLUMNS) for name in FEATURE_COLUMNS}
+
+        avg = np.mean(vectors, axis=0)
+        total = float(np.sum(avg))
+        if total <= 0:
+            return {name: 1.0 / len(FEATURE_COLUMNS) for name in FEATURE_COLUMNS}
+        return {name: float(v / total) for name, v in zip(FEATURE_COLUMNS, avg)}
+
     def _merge_feature_importance(
-        self, fi_malignant: dict[str, float], fi_benign: dict[str, float]
+        self,
+        fi_malignant: dict[str, float],
+        fi_benign: dict[str, float],
     ) -> dict[str, float]:
         merged = {}
         for name in FEATURE_COLUMNS:
@@ -294,13 +677,10 @@ def _normalize_label(value: Any) -> str | None:
         "良性": "benign",
         "恶性": "malignant",
     }
-    if v in mapping:
-        return mapping[v]
-    return None
+    return mapping.get(v)
 
 
 def _normalize_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """统一外部列名别名到系统内部列名。"""
     col_map = {
         "ca19-9": "ca19_9",
         "ca19 9": "ca19_9",
@@ -314,3 +694,17 @@ def _normalize_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     if rename_dict:
         return df.rename(columns=rename_dict)
     return df
+
+
+def _prepare_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    data = df.copy()
+    data.columns = [str(c).strip().lower() for c in data.columns]
+    data = _normalize_feature_columns(data)
+    missing = [col for col in FEATURE_COLUMNS if col not in data.columns]
+    if missing:
+        readable_missing = ["ca19-9" if col == "ca19_9" else col for col in missing]
+        raise ValueError(f"缺少必要特征: {', '.join(readable_missing)}")
+
+    data = data[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    data = data.fillna(data.mean(numeric_only=True))
+    return data

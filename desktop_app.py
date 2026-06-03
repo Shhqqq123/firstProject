@@ -24,6 +24,12 @@ def _find_free_port() -> int:
 
 
 def _build_streamlit_cmd(port: int) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [
+            sys.executable,
+            "--streamlit-server",
+            str(port),
+        ]
     return [
         sys.executable,
         "-m",

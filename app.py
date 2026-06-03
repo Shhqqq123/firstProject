@@ -40,7 +40,11 @@ from medical_system.reporting import generate_report_html, generate_report_pdf
 from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn_class
 
 
-st.set_page_config(page_title="乳腺风险评估系统", page_icon=":hospital:", layout="wide")
+st.set_page_config(
+    page_title="乳腺风险评估系统",
+    page_icon=":hospital:",
+    layout="wide",
+)
 ensure_directories()
 init_db()
 
@@ -264,7 +268,7 @@ def main() -> None:
     menus = base_menu + admin_menu if is_admin() else base_menu
 
     menu = st.sidebar.radio("功能菜单", menus)
-    st.title("基于6项肿瘤标志物与集成学习的乳腺全流程风险评估系统 V1.0")
+    st.title("基于六项肿瘤标志物的乳腺癌诊断评估系统 V1.0")
     st.caption("本系统用于风险筛查与辅助参考，不作为最终诊断依据。")
 
     if menu == "系统概览":
@@ -511,6 +515,7 @@ def page_training() -> None:
 
     if source == "数据库已标注数据":
         train_df = list_labeled_tests()
+        st.warning("提示：数据库样本可能包含历史导入/演示数据。若要复现你单独脚本结果，建议使用“上传 CSV/XLSX”并上传同一份训练文件。")
         st.write(f"可用标注样本：{len(train_df)} 条")
         if not train_df.empty:
             st.dataframe(train_df.head(20), use_container_width=True)

@@ -6,3 +6,4 @@ reports/
 data/medical_system.db
 build/
 dist/
+RelevantDocuments/
