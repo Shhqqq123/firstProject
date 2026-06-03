@@ -11,7 +11,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_recall_curve, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from .config import FEATURE_COLUMNS, LABEL_COLUMN
+from .config import FEATURE_COLUMNS, FEATURE_PREPROCESSING_VERSION, LABEL_COLUMN
+from .preprocessing import normalize_by_reference_ranges
 
 try:
     from catboost import CatBoostClassifier
@@ -177,7 +178,8 @@ class BreastRiskModel:
             raise ValueError("模型尚未训练，无法保存。")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 2,
+            "version": 3,
+            "feature_preprocessing": FEATURE_PREPROCESSING_VERSION,
             "random_state": self.random_state,
             "n_models": self.n_models,
             "malignant_models": self.malignant_models,
@@ -196,6 +198,8 @@ class BreastRiskModel:
         payload = joblib.load(path)
         if isinstance(payload, cls):  # backward compatibility for direct dumps
             return payload
+        if payload.get("feature_preprocessing") != FEATURE_PREPROCESSING_VERSION:
+            raise ValueError("当前代码已启用参考区间标准化，请重新训练模型后再进行预测。")
 
         model = cls(
             random_state=int(payload.get("random_state", 42)),
@@ -682,9 +686,23 @@ def _normalize_label(value: Any) -> str | None:
 
 def _normalize_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     col_map = {
+        "akr1b10": "akr1b10",
+        "akr1b-10": "akr1b10",
+        "akr1b 10": "akr1b10",
         "ca19-9": "ca19_9",
         "ca19 9": "ca19_9",
+        "ca199": "ca19_9",
+        "ca19.9": "ca19_9",
         "ca19_9": "ca19_9",
+        "nse": "nse",
+        "ca125": "ca125",
+        "ca-125": "ca125",
+        "ca 125": "ca125",
+        "ca153": "ca153",
+        "ca15-3": "ca153",
+        "ca15 3": "ca153",
+        "ca15_3": "ca153",
+        "cea": "cea",
     }
     rename_dict: dict[str, str] = {}
     for col in df.columns:
@@ -706,5 +724,6 @@ def _prepare_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"缺少必要特征: {', '.join(readable_missing)}")
 
     data = data[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
-    data = data.fillna(data.mean(numeric_only=True))
+    data = normalize_by_reference_ranges(data)
+    data = data.fillna(data.mean(numeric_only=True)).fillna(0.0)
     return data

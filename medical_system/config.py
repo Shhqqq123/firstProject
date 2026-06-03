@@ -18,6 +18,27 @@ MODEL_PATH = MODEL_DIR / "breast_risk_model.joblib"
 FEATURE_COLUMNS = ["akr1b10", "ca19_9", "nse", "ca125", "ca153", "cea"]
 LABEL_COLUMN = "label"
 
+# 默认参考区间上限，用于消除不同检测设备/医院量纲差异。
+# 变换方式见 medical_system.preprocessing.normalize_by_reference_ranges。
+REFERENCE_UPPER_LIMITS = {
+    "akr1b10": 373.5,
+    "ca19_9": 25.8,
+    "nse": 15.8,
+    "ca125": 36.0,
+    "ca153": 26.2,
+    "cea": 5.77,
+}
+FEATURE_PREPROCESSING_VERSION = "reference_log1p_uln_v1"
+
+FEATURE_DISPLAY_NAMES = {
+    "akr1b10": "AKR1B10",
+    "ca19_9": "CA19-9",
+    "nse": "NSE",
+    "ca125": "CA125",
+    "ca153": "CA15-3",
+    "cea": "CEA",
+}
+
 # 固定类别顺序
 CLASS_ORDER = ["normal", "benign", "malignant"]
 CLASS_NAME_MAP = {
@@ -32,4 +53,3 @@ def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-
