@@ -7,7 +7,8 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_recall_curve, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
@@ -29,7 +30,7 @@ class TrainResult:
 class BreastRiskModel:
     """Two-expert risk model.
 
-    - Malignant task: normal vs malignant, prefers CatBoost when available.
+    - Malignant task: normal vs malignant, uses calibrated ExtraTrees/RandomForest blend.
     - Benign task: normal vs benign, uses RandomForest ensemble.
     - Final prediction: combine two binary probabilities into three-class probabilities.
     """
@@ -53,6 +54,10 @@ class BreastRiskModel:
         self.benign_positive_class_weight: float = 1.0
         # Cap healthy samples for the benign expert so larger latest tables do not skew it.
         self.benign_negative_max_ratio: float = 3.0
+        self.malignant_et_weight: float = 0.70
+        self.malignant_rf_weight: float = 0.30
+        self.malignant_calib_method: str = "isotonic"
+        self.malignant_calib_cv: int = 3
 
     def train(self, df: pd.DataFrame, test_size: float = 0.2) -> TrainResult:
         _ = test_size  # keep signature compatible
@@ -71,7 +76,7 @@ class BreastRiskModel:
             positive_label="malignant",
             negative_label="normal",
             task_name="正常vs恶性",
-            preferred_model="catboost",
+            preferred_model="et_rf_blend",
         )
         benign_result = self._train_binary_task(
             data=data,
@@ -180,10 +185,14 @@ class BreastRiskModel:
             raise ValueError("模型尚未训练，无法保存。")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 3,
+            "version": 4,
             "feature_preprocessing": FEATURE_PREPROCESSING_VERSION,
             "random_state": self.random_state,
             "n_models": self.n_models,
+            "malignant_et_weight": self.malignant_et_weight,
+            "malignant_rf_weight": self.malignant_rf_weight,
+            "malignant_calib_method": self.malignant_calib_method,
+            "malignant_calib_cv": self.malignant_calib_cv,
             "malignant_models": self.malignant_models,
             "benign_models": self.benign_models,
             "malignant_model_type": self.malignant_model_type,
@@ -207,6 +216,10 @@ class BreastRiskModel:
             random_state=int(payload.get("random_state", 42)),
             n_models=int(payload.get("n_models", 60)),
         )
+        model.malignant_et_weight = float(payload.get("malignant_et_weight", 0.70))
+        model.malignant_rf_weight = float(payload.get("malignant_rf_weight", 0.30))
+        model.malignant_calib_method = str(payload.get("malignant_calib_method", "isotonic"))
+        model.malignant_calib_cv = int(payload.get("malignant_calib_cv", 3))
         model.malignant_models = payload.get("malignant_models", [])
         model.benign_models = payload.get("benign_models", [])
         model.malignant_model_type = str(payload.get("malignant_model_type", "random_forest"))
@@ -240,6 +253,13 @@ class BreastRiskModel:
         task_name: str,
         preferred_model: str,
     ) -> dict[str, Any]:
+        if preferred_model == "et_rf_blend":
+            return self._train_et_rf_blend_task(
+                data=data,
+                positive_label=positive_label,
+                negative_label=negative_label,
+                task_name=task_name,
+            )
         if preferred_model == "random_forest":
             return self._train_random_forest_task(
                 data=data,
@@ -299,6 +319,61 @@ class BreastRiskModel:
             "metrics": metrics,
             "feature_importance": feature_importance,
             "model_type": model_type,
+            "threshold": float(threshold),
+        }
+
+    def _train_et_rf_blend_task(
+        self,
+        data: pd.DataFrame,
+        positive_label: str,
+        negative_label: str,
+        task_name: str,
+    ) -> dict[str, Any]:
+        """Train the malignant expert with the validated ET/RF isotonic blend."""
+        subset = data[data[LABEL_COLUMN].isin([positive_label, negative_label])].copy().reset_index(drop=True)
+        subset["binary_label"] = (subset[LABEL_COLUMN] == positive_label).astype(int)
+        if len(subset) < 20:
+            raise ValueError(f"{task_name}样本太少，无法训练。")
+
+        train_df, val_df = train_test_split(
+            subset,
+            test_size=max(0.2, 1 / len(subset)),
+            random_state=self.random_state,
+            stratify=subset["binary_label"],
+        )
+
+        X_train = _prepare_feature_frame(train_df)
+        y_train = train_df["binary_label"].astype(int).to_numpy()
+        X_val = _prepare_feature_frame(val_df)
+        y_val = val_df["binary_label"].astype(int).to_numpy()
+
+        et_model, rf_model = self._build_malignant_blend_models(seed=self.random_state)
+        et_model.fit(X_train, y_train)
+        rf_model.fit(X_train, y_train)
+
+        blend_model = {
+            "type": "et_rf_isotonic_blend",
+            "et_model": et_model,
+            "rf_model": rf_model,
+            "et_weight": self.malignant_et_weight,
+            "rf_weight": self.malignant_rf_weight,
+        }
+        ensemble_prob = self._predict_model_proba(blend_model, X_val)
+        threshold = 0.5
+        y_pred = (ensemble_prob >= threshold).astype(int)
+
+        metrics = {
+            "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "accuracy": float(accuracy_score(y_val, y_pred)),
+            "precision": float(precision_score(y_val, y_pred, zero_division=0)),
+            "recall": float(recall_score(y_val, y_pred, zero_division=0)),
+        }
+
+        return {
+            "models": [blend_model],
+            "metrics": metrics,
+            "feature_importance": self._average_feature_importance([blend_model]),
+            "model_type": "et_rf_isotonic_blend",
             "threshold": float(threshold),
         }
 
@@ -542,6 +617,32 @@ class BreastRiskModel:
             n_jobs=1,
         )
 
+    def _build_malignant_blend_models(self, seed: int) -> tuple[CalibratedClassifierCV, CalibratedClassifierCV]:
+        et = ExtraTreesClassifier(
+            n_estimators=260,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features="sqrt",
+            class_weight="balanced",
+            random_state=seed,
+            n_jobs=-1,
+        )
+        rf = RandomForestClassifier(
+            n_estimators=320,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features="sqrt",
+            class_weight="balanced",
+            random_state=seed + 999,
+            n_jobs=-1,
+        )
+        return (
+            CalibratedClassifierCV(estimator=et, method=self.malignant_calib_method, cv=self.malignant_calib_cv),
+            CalibratedClassifierCV(estimator=rf, method=self.malignant_calib_method, cv=self.malignant_calib_cv),
+        )
+
     def _bootstrap_training_set(
         self,
         X: pd.DataFrame,
@@ -564,6 +665,16 @@ class BreastRiskModel:
         return X_sampled, y_sampled
 
     def _predict_model_proba(self, model: Any, X: pd.DataFrame) -> np.ndarray:
+        if isinstance(model, dict) and model.get("type") == "et_rf_isotonic_blend":
+            et_weight = float(model.get("et_weight", 0.70))
+            rf_weight = float(model.get("rf_weight", 0.30))
+            total_weight = et_weight + rf_weight
+            if total_weight <= 0:
+                et_weight, rf_weight, total_weight = 0.70, 0.30, 1.0
+            et_prob = self._predict_model_proba(model["et_model"], X)
+            rf_prob = self._predict_model_proba(model["rf_model"], X)
+            return (et_weight * et_prob + rf_weight * rf_prob) / total_weight
+
         proba = model.predict_proba(X)
         if isinstance(proba, list):
             proba = np.asarray(proba)
@@ -628,14 +739,7 @@ class BreastRiskModel:
     def _average_feature_importance(self, models: list[Any]) -> dict[str, float]:
         vectors: list[np.ndarray] = []
         for model in models:
-            if hasattr(model, "feature_importances_"):
-                vectors.append(np.asarray(model.feature_importances_, dtype=float))
-                continue
-            if hasattr(model, "get_feature_importance"):
-                try:
-                    vectors.append(np.asarray(model.get_feature_importance(), dtype=float))
-                except Exception:
-                    continue
+            vectors.extend(self._feature_importance_vectors(model))
 
         if not vectors:
             return {name: 1.0 / len(FEATURE_COLUMNS) for name in FEATURE_COLUMNS}
@@ -645,6 +749,33 @@ class BreastRiskModel:
         if total <= 0:
             return {name: 1.0 / len(FEATURE_COLUMNS) for name in FEATURE_COLUMNS}
         return {name: float(v / total) for name, v in zip(FEATURE_COLUMNS, avg)}
+
+    def _feature_importance_vectors(self, model: Any) -> list[np.ndarray]:
+        if isinstance(model, dict) and model.get("type") == "et_rf_isotonic_blend":
+            vectors = []
+            vectors.extend(self._feature_importance_vectors(model.get("et_model")))
+            vectors.extend(self._feature_importance_vectors(model.get("rf_model")))
+            return vectors
+
+        if hasattr(model, "feature_importances_"):
+            return [np.asarray(model.feature_importances_, dtype=float)]
+
+        if hasattr(model, "get_feature_importance"):
+            try:
+                return [np.asarray(model.get_feature_importance(), dtype=float)]
+            except Exception:
+                return []
+
+        calibrated = getattr(model, "calibrated_classifiers_", None)
+        if calibrated:
+            vectors = []
+            for item in calibrated:
+                base_model = getattr(item, "estimator", None) or getattr(item, "base_estimator", None)
+                if base_model is not None:
+                    vectors.extend(self._feature_importance_vectors(base_model))
+            return vectors
+
+        return []
 
     def _merge_feature_importance(
         self,
