@@ -102,9 +102,11 @@ class BreastRiskModel:
             "malignant_auc": float(malignant_result["metrics"]["auc_roc"]),
             "malignant_precision": float(malignant_result["metrics"]["precision"]),
             "malignant_recall": float(malignant_result["metrics"]["recall"]),
+            "malignant_accuracy": float(malignant_result["metrics"]["accuracy"]),
             "benign_auc": float(benign_result["metrics"]["auc_roc"]),
             "benign_precision": float(benign_result["metrics"]["precision"]),
             "benign_recall": float(benign_result["metrics"]["recall"]),
+            "benign_accuracy": float(benign_result["metrics"]["accuracy"]),
         }
         self.train_metrics = metrics
         return TrainResult(metrics=metrics, class_distribution=class_distribution)

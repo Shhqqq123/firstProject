@@ -88,6 +88,40 @@ def label_to_cn(label: str) -> str:
     return LABEL_NAME_MAP.get(label, label)
 
 
+def _format_metric(metrics: dict[str, Any], key: str) -> str:
+    value = metrics.get(key)
+    if value is None:
+        return "-"
+    return f"{float(value):.4f}"
+
+
+def _render_training_result(metrics: dict[str, Any], class_distribution: dict[str, int] | None = None) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("平均AUC", _format_metric(metrics, "auc"))
+    c2.metric("平均Precision", _format_metric(metrics, "precision"))
+    c3.metric("平均Recall", _format_metric(metrics, "recall"))
+    c4.metric("平均Accuracy", _format_metric(metrics, "accuracy"))
+
+    if "malignant_auc" in metrics:
+        st.write(
+            f"恶性任务：AUC={_format_metric(metrics, 'malignant_auc')}，"
+            f"Precision={_format_metric(metrics, 'malignant_precision')}，"
+            f"Recall={_format_metric(metrics, 'malignant_recall')}，"
+            f"Accuracy={_format_metric(metrics, 'malignant_accuracy')}"
+        )
+    if "benign_auc" in metrics:
+        st.write(
+            f"良性任务：AUC={_format_metric(metrics, 'benign_auc')}，"
+            f"Precision={_format_metric(metrics, 'benign_precision')}，"
+            f"Recall={_format_metric(metrics, 'benign_recall')}，"
+            f"Accuracy={_format_metric(metrics, 'benign_accuracy')}"
+        )
+
+    if class_distribution:
+        dist_df = pd.DataFrame([{"类别": to_cn_class(k), "样本数": v} for k, v in class_distribution.items()])
+        st.dataframe(dist_df, use_container_width=True)
+
+
 def _display_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -552,32 +586,23 @@ def page_training() -> None:
             model.save(MODEL_PATH)
             audit("train_model", "ml", "model", "breast_risk_model.joblib", result.metrics)
 
-            st.success(f"训练完成，模型已保存：{MODEL_PATH}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("平均AUC", f"{result.metrics['auc']:.4f}")
-            c2.metric("平均Precision", f"{result.metrics['precision']:.4f}")
-            c3.metric("平均Recall", f"{result.metrics['recall']:.4f}")
-            c4.metric("平均Accuracy", f"{result.metrics['accuracy']:.4f}")
-
-            if "malignant_auc" in result.metrics:
-                st.write(
-                    f"恶性任务：AUC={result.metrics['malignant_auc']:.4f}，"
-                    f"Precision={result.metrics['malignant_precision']:.4f}，"
-                    f"Recall={result.metrics['malignant_recall']:.4f}"
-                )
-            if "benign_auc" in result.metrics:
-                st.write(
-                    f"良性任务：AUC={result.metrics['benign_auc']:.4f}，"
-                    f"Precision={result.metrics['benign_precision']:.4f}，"
-                    f"Recall={result.metrics['benign_recall']:.4f}"
-                )
-
-            dist_df = pd.DataFrame(
-                [{"类别": to_cn_class(k), "样本数": v} for k, v in result.class_distribution.items()]
-            )
-            st.dataframe(dist_df, use_container_width=True)
+            st.session_state["last_training_message"] = f"训练完成，模型已保存：{MODEL_PATH}"
+            st.session_state["last_training_result"] = {
+                "metrics": result.metrics,
+                "class_distribution": result.class_distribution,
+            }
         except Exception as exc:
             st.error(f"训练失败：{exc}")
+
+    last_training = st.session_state.get("last_training_result")
+    if isinstance(last_training, dict):
+        message = st.session_state.get("last_training_message")
+        if message:
+            st.success(str(message))
+        _render_training_result(
+            metrics=last_training.get("metrics", {}),
+            class_distribution=last_training.get("class_distribution", {}),
+        )
 
 
 def page_inference() -> None:
