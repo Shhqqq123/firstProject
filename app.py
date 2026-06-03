@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,234 @@ STAGE_NAME_MAP = {"screening": "体检筛查", "benign_followup": "良性随访"
 LABEL_NAME_MAP = {"": "未标注", "normal": "正常", "benign": "良性", "malignant": "恶性"}
 
 
+def apply_global_style() -> None:
+    """Inject a professional medical visual layer without changing business logic."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --medical-blue: #1a5f7a;
+            --medical-blue-dark: #124559;
+            --medical-green: #00a896;
+            --medical-bg: #f6f8fa;
+            --medical-card: #ffffff;
+            --medical-border: #e2e8f0;
+            --medical-text: #1f2937;
+            --medical-muted: #64748b;
+            --medical-red: #c0392b;
+            --medical-orange: #d97706;
+        }
+
+        .stApp {
+            background: linear-gradient(180deg, #f8fbfc 0%, var(--medical-bg) 100%) !important;
+            color: var(--medical-text);
+            font-family: "Microsoft YaHei", "DengXian", "Noto Sans CJK SC", sans-serif !important;
+        }
+
+        h1, h2, h3, h4 {
+            color: var(--medical-blue) !important;
+            font-weight: 700 !important;
+            letter-spacing: .01em;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #ffffff !important;
+            border-right: 1px solid var(--medical-border);
+            box-shadow: 8px 0 24px rgba(15, 23, 42, .03);
+        }
+
+        [data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 10px;
+            padding: 6px 8px;
+            transition: background-color .18s ease, color .18s ease;
+        }
+
+        [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: #eef7fa;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--medical-blue);
+            margin: 24px 0 14px;
+            border-left: 5px solid var(--medical-blue);
+            padding-left: 12px;
+            line-height: 1.35;
+        }
+
+        .sub-section-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #334155;
+            margin: 20px 0 10px;
+            border-left: 4px solid var(--medical-green);
+            padding-left: 10px;
+            line-height: 1.35;
+        }
+
+        .med-card {
+            background: var(--medical-card);
+            border: 1px solid var(--medical-border);
+            border-radius: 14px;
+            padding: 18px 20px;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, .05);
+            margin-bottom: 16px;
+        }
+
+        .med-note {
+            background: #edf7fa;
+            border: 1px solid #d7edf3;
+            border-left: 5px solid var(--medical-blue);
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: #245064;
+            font-size: 14px;
+            margin-bottom: 18px;
+        }
+
+        .task-card table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .task-card td {
+            padding: 7px 0;
+            font-size: 14px;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .task-card td:last-child {
+            text-align: right;
+            font-weight: 700;
+            color: var(--medical-blue);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .badge-red {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-blue {
+            background: #e0f2fe;
+            color: #075985;
+        }
+
+        .result-panel {
+            border-radius: 16px;
+            padding: 20px 22px;
+            border: 1px solid var(--medical-border);
+            box-shadow: 0 14px 34px rgba(15, 23, 42, .06);
+            margin: 18px 0;
+        }
+
+        .prob-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            border: 1px solid var(--medical-border);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, .04);
+        }
+
+        .prob-table td {
+            padding: 12px;
+            border-bottom: 1px solid #edf2f7;
+            font-size: 14px;
+        }
+
+        .prob-track {
+            width: 100%;
+            height: 12px;
+            border-radius: 999px;
+            background: #edf2f7;
+            overflow: hidden;
+        }
+
+        .prob-fill {
+            height: 100%;
+            border-radius: 999px;
+        }
+
+        div[data-testid="stMetric"] {
+            background: #ffffff !important;
+            border: 1px solid var(--medical-border) !important;
+            border-radius: 14px !important;
+            padding: 16px 14px !important;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .05) !important;
+            transition: transform .18s ease, box-shadow .18s ease !important;
+        }
+
+        div[data-testid="stMetric"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 14px 30px rgba(15, 23, 42, .08) !important;
+        }
+
+        div[data-testid="stMetricLabel"] > div {
+            color: var(--medical-muted) !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+        }
+
+        div[data-testid="stMetricValue"] > div {
+            color: var(--medical-blue) !important;
+            font-size: 27px !important;
+            font-weight: 800 !important;
+        }
+
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--medical-border) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .04) !important;
+            overflow: hidden;
+        }
+
+        .stForm {
+            background: #ffffff !important;
+            border: 1px solid var(--medical-border) !important;
+            border-radius: 14px !important;
+            padding: 20px !important;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, .04) !important;
+        }
+
+        button {
+            border-radius: 9px !important;
+            font-weight: 700 !important;
+            transition: all .18s ease !important;
+        }
+
+        button[kind="primary"] {
+            background: var(--medical-blue) !important;
+            border: 1px solid var(--medical-blue) !important;
+            color: #ffffff !important;
+            box-shadow: 0 8px 18px rgba(26, 95, 122, .22) !important;
+        }
+
+        button[kind="primary"]:hover {
+            background: var(--medical-blue-dark) !important;
+            transform: translateY(-1px);
+        }
+
+        section[data-testid="stFileUploadDropzone"] {
+            border: 2px dashed #cbd5e1 !important;
+            background: #f8fafc !important;
+            border-radius: 14px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _rerun() -> None:
     if hasattr(st, "rerun"):
         st.rerun()
@@ -96,30 +325,138 @@ def _format_metric(metrics: dict[str, Any], key: str) -> str:
 
 
 def _render_training_result(metrics: dict[str, Any], class_distribution: dict[str, int] | None = None) -> None:
+    st.markdown("<div class='section-title'>交叉验证多维评估指标</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("平均AUC", _format_metric(metrics, "auc"))
     c2.metric("平均Precision", _format_metric(metrics, "precision"))
     c3.metric("平均Recall", _format_metric(metrics, "recall"))
     c4.metric("平均Accuracy", _format_metric(metrics, "accuracy"))
 
-    if "malignant_auc" in metrics:
-        st.write(
-            f"恶性任务：AUC={_format_metric(metrics, 'malignant_auc')}，"
-            f"Precision={_format_metric(metrics, 'malignant_precision')}，"
-            f"Recall={_format_metric(metrics, 'malignant_recall')}，"
-            f"Accuracy={_format_metric(metrics, 'malignant_accuracy')}"
-        )
-    if "benign_auc" in metrics:
-        st.write(
-            f"良性任务：AUC={_format_metric(metrics, 'benign_auc')}，"
-            f"Precision={_format_metric(metrics, 'benign_precision')}，"
-            f"Recall={_format_metric(metrics, 'benign_recall')}，"
-            f"Accuracy={_format_metric(metrics, 'benign_accuracy')}"
-        )
+    if "malignant_auc" in metrics or "benign_auc" in metrics:
+        st.markdown("<div class='sub-section-title'>各预测子任务性能详情</div>", unsafe_allow_html=True)
+        left, right = st.columns(2)
+        if "malignant_auc" in metrics:
+            with left:
+                st.markdown(
+                    f"""
+                    <div class="med-card task-card">
+                        <h4 style="color:#c0392b; margin-top:0; border-bottom:1px solid #fee2e2; padding-bottom:8px;">
+                            恶性病变预测子任务
+                        </h4>
+                        <table>
+                            <tr><td>AUC 检测效能</td><td><span class="badge badge-red">{_format_metric(metrics, "malignant_auc")}</span></td></tr>
+                            <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "malignant_precision")}</td></tr>
+                            <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "malignant_recall")}</td></tr>
+                            <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "malignant_accuracy")}</td></tr>
+                        </table>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        if "benign_auc" in metrics:
+            with right:
+                st.markdown(
+                    f"""
+                    <div class="med-card task-card">
+                        <h4 style="color:#1a5f7a; margin-top:0; border-bottom:1px solid #e0f2fe; padding-bottom:8px;">
+                            良性病变预测子任务
+                        </h4>
+                        <table>
+                            <tr><td>AUC 检测效能</td><td><span class="badge badge-blue">{_format_metric(metrics, "benign_auc")}</span></td></tr>
+                            <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "benign_precision")}</td></tr>
+                            <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "benign_recall")}</td></tr>
+                            <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_accuracy")}</td></tr>
+                        </table>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
     if class_distribution:
+        st.markdown("<div class='sub-section-title'>样本类别分布</div>", unsafe_allow_html=True)
         dist_df = pd.DataFrame([{"类别": to_cn_class(k), "样本数": v} for k, v in class_distribution.items()])
         st.dataframe(dist_df, use_container_width=True)
+
+
+def _risk_visual_style(risk_level: str) -> tuple[str, str, str]:
+    text = str(risk_level)
+    if "高" in text or "High" in text:
+        return "#c0392b", "#fff1f2", "需重点关注"
+    if "中" in text or "Medium" in text:
+        return "#d97706", "#fffbeb", "建议复核随访"
+    return "#15803d", "#f0fdf4", "当前风险较低"
+
+
+def _render_probability_table(probabilities: dict[str, float], predicted_class: str, accent_color: str) -> None:
+    rows = []
+    for key, value in probabilities.items():
+        percent = max(0.0, min(100.0, float(value) * 100.0))
+        fill_color = accent_color if key == predicted_class else "#94a3b8"
+        rows.append(
+            f"""
+            <tr>
+                <td><strong>{to_cn_class(key)}</strong></td>
+                <td>
+                    <div class="prob-track">
+                        <div class="prob-fill" style="width:{percent:.2f}%; background:{fill_color};"></div>
+                    </div>
+                </td>
+                <td style="text-align:right;"><strong>{percent:.2f}%</strong></td>
+            </tr>
+            """
+        )
+    st.markdown(f"<table class='prob-table'>{''.join(rows)}</table>", unsafe_allow_html=True)
+
+
+def _render_inference_result(
+    predicted_class: str,
+    probabilities: dict[str, float],
+    confidence: float,
+    risk_level: str,
+    feature_contribution: dict[str, float],
+    warning: bool,
+    notes: list[str],
+) -> None:
+    accent_color, bg_color, risk_hint = _risk_visual_style(risk_level)
+    st.markdown("<div class='section-title'>诊断评估结果报告</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="result-panel" style="background:{bg_color}; border-left:6px solid {accent_color};">
+            <div style="display:flex; justify-content:space-between; gap:18px; align-items:flex-start;">
+                <div>
+                    <div style="font-size:14px; color:#64748b; font-weight:700;">风险等级</div>
+                    <div style="font-size:30px; color:{accent_color}; font-weight:800; margin-top:2px;">{risk_level}</div>
+                    <div style="font-size:14px; color:#334155; margin-top:8px;">{risk_hint}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:14px; color:#64748b; font-weight:700;">预测类别</div>
+                    <div style="font-size:24px; color:#1a5f7a; font-weight:800; margin-top:2px;">{to_cn_class(predicted_class)}</div>
+                    <div style="font-size:14px; color:#334155; margin-top:8px;">可信度 {float(confidence) * 100:.2f}%</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("<div class='sub-section-title'>三分类概率分布</div>", unsafe_allow_html=True)
+        _render_probability_table(probabilities, predicted_class, accent_color)
+    with right:
+        st.markdown("<div class='sub-section-title'>标志物贡献度</div>", unsafe_allow_html=True)
+        contrib_df = pd.DataFrame(
+            [{"指标": k.upper() if k != "ca19_9" else "CA19-9", "贡献度": v} for k, v in sorted(feature_contribution.items(), key=lambda x: x[1], reverse=True)]
+        ).set_index("指标")
+        st.bar_chart(contrib_df)
+
+    st.markdown("<div class='sub-section-title'>随访趋势提示</div>", unsafe_allow_html=True)
+    if warning:
+        st.error("预警：随访趋势提示复发风险可能升高，建议结合临床资料进一步复核。")
+    else:
+        st.info("当前未触发复发风险预警。")
+    for note in notes:
+        st.write(f"- {note}")
 
 
 def _display_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -275,6 +612,8 @@ def login_page() -> None:
 
 
 def main() -> None:
+    apply_global_style()
+
     if current_user() is None:
         login_page()
         return
@@ -282,8 +621,18 @@ def main() -> None:
     user = current_user()
     assert user is not None
 
-    st.sidebar.write(f"当前用户：`{user['username']}`")
-    st.sidebar.write(f"角色：`{role_to_cn(str(user['role']))}`")
+    username_display = html.escape(str(user["username"]))
+    role_display = html.escape(role_to_cn(str(user["role"])))
+    st.sidebar.markdown(
+        f"""
+        <div class="med-card" style="padding:14px 16px; margin-bottom:14px;">
+            <div style="font-size:13px; color:#64748b; font-weight:700;">当前登录用户</div>
+            <div style="font-size:18px; color:#1a5f7a; font-weight:800; margin-top:4px;">{username_display}</div>
+            <div style="font-size:13px; color:#334155; margin-top:6px;">角色：{role_display}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("退出登录"):
         audit("logout", "auth")
         st.session_state.pop("auth_user", None)
@@ -301,7 +650,8 @@ def main() -> None:
     admin_menu = ["审计日志", "用户管理"]
     menus = base_menu + admin_menu if is_admin() else base_menu
 
-    menu = st.sidebar.radio("功能菜单", menus)
+    st.sidebar.markdown("<div style='font-size:13px; color:#64748b; font-weight:800; margin:12px 0 8px;'>功能菜单</div>", unsafe_allow_html=True)
+    menu = st.sidebar.radio("功能菜单", menus, label_visibility="collapsed")
     st.title("基于六项肿瘤标志物的乳腺癌诊断评估系统 V1.0")
     st.caption("本系统用于风险筛查与辅助参考，不作为最终诊断依据。")
 
@@ -539,7 +889,15 @@ def page_training() -> None:
         st.warning("当前角色为只读，不能执行模型训练。")
         return
 
-    st.subheader("模型训练")
+    st.markdown("<div class='section-title'>诊断评估模型训练与部署</div>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="med-note">
+            系统将基于已标注的六项肿瘤标志物样本训练双专家模型。训练完成后，模型权重会保存到本地并用于后续风险评估。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     source = st.radio(
         "训练数据来源",
         ["数据库已标注数据", "上传 CSV/XLSX", "合成样本（1000条）"],
@@ -576,23 +934,24 @@ def page_training() -> None:
             audit("import_synthetic_demo", "training", "subject", subject_id, {"count": imported})
             st.success(f"导入完成，共 {imported} 条，受检者ID={subject_id}")
 
-    if st.button("开始训练", type="primary"):
+    if st.button("开始训练", type="primary", use_container_width=True):
         if train_df.empty:
             st.error("训练数据为空。")
             return
-        try:
-            model = BreastRiskModel()
-            result = model.train(train_df)
-            model.save(MODEL_PATH)
-            audit("train_model", "ml", "model", "breast_risk_model.joblib", result.metrics)
+        with st.spinner("模型训练中，请稍候..."):
+            try:
+                model = BreastRiskModel()
+                result = model.train(train_df)
+                model.save(MODEL_PATH)
+                audit("train_model", "ml", "model", "breast_risk_model.joblib", result.metrics)
 
-            st.session_state["last_training_message"] = f"训练完成，模型已保存：{MODEL_PATH}"
-            st.session_state["last_training_result"] = {
-                "metrics": result.metrics,
-                "class_distribution": result.class_distribution,
-            }
-        except Exception as exc:
-            st.error(f"训练失败：{exc}")
+                st.session_state["last_training_message"] = f"训练完成，模型已保存：{MODEL_PATH}"
+                st.session_state["last_training_result"] = {
+                    "metrics": result.metrics,
+                    "class_distribution": result.class_distribution,
+                }
+            except Exception as exc:
+                st.error(f"训练失败：{exc}")
 
     last_training = st.session_state.get("last_training_result")
     if isinstance(last_training, dict):
@@ -610,7 +969,15 @@ def page_inference() -> None:
         st.warning("当前角色为只读，不能写入评估结果。")
         return
 
-    st.subheader("风险评估")
+    st.markdown("<div class='section-title'>六项肿瘤标志物智能风险评估</div>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="med-note">
+            请选择受检者及对应检验记录。系统会读取本地已训练模型，输出正常、良性、恶性的三分类概率及随访风险提示。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     model = load_model()
     if model is None:
         st.warning("未检测到模型，请先训练模型。")
@@ -634,47 +1001,47 @@ def page_inference() -> None:
     if not current:
         return
 
-    if st.button("开始评估", type="primary"):
+    st.markdown("<div class='sub-section-title'>当前送检样本特征明细</div>", unsafe_allow_html=True)
+    marker_cols = st.columns(len(FEATURE_COLUMNS))
+    for idx, key in enumerate(FEATURE_COLUMNS):
+        marker_display = "CA19-9" if key == "ca19_9" else key.upper()
+        value = current.get(key)
+        marker_cols[idx].metric(marker_display, f"{float(value):.4f}" if value is not None else "-")
+
+    if st.button("开始评估", type="primary", use_container_width=True):
         sample_df = pd.DataFrame([{k: current.get(k) for k in FEATURE_COLUMNS}])
         try:
-            pred = model.predict(sample_df)
-            predicted_class = pred["predicted_class"]
-            probabilities = pred["probabilities"]
-            risk_level = get_risk_level(
-                predicted_class=predicted_class,
-                malignant_prob=probabilities.get("malignant", 0.0),
-                confidence=float(pred["confidence"]),
-            )
-            follow_df = get_followup_dataframe(subject_id)
-            warning, notes = followup_warning_analysis(follow_df)
-            eval_id = save_evaluation(
-                test_id=test_id,
-                predicted_class=predicted_class,
-                probabilities=probabilities,
-                risk_level=risk_level,
-                warning_flag=warning,
-                feature_importance=pred["feature_contribution"],
-            )
-            audit("inference", "ml", "evaluation", eval_id, {"test_id": test_id, "risk_level": risk_level})
+            with st.spinner("模型评估中，请稍候..."):
+                pred = model.predict(sample_df)
+                predicted_class = pred["predicted_class"]
+                probabilities = pred["probabilities"]
+                risk_level = get_risk_level(
+                    predicted_class=predicted_class,
+                    malignant_prob=probabilities.get("malignant", 0.0),
+                    confidence=float(pred["confidence"]),
+                )
+                follow_df = get_followup_dataframe(subject_id)
+                warning, notes = followup_warning_analysis(follow_df)
+                eval_id = save_evaluation(
+                    test_id=test_id,
+                    predicted_class=predicted_class,
+                    probabilities=probabilities,
+                    risk_level=risk_level,
+                    warning_flag=warning,
+                    feature_importance=pred["feature_contribution"],
+                )
+                audit("inference", "ml", "evaluation", eval_id, {"test_id": test_id, "risk_level": risk_level})
 
             st.success("评估完成，结果已保存。")
-            st.write(f"预测类别：**{to_cn_class(predicted_class)}**")
-            st.write(f"风险等级：**{risk_level}**")
-
-            prob_df = pd.DataFrame([{"类别": to_cn_class(k), "概率": float(v)} for k, v in probabilities.items()])
-            st.dataframe(prob_df, use_container_width=True)
-
-            contrib_df = pd.DataFrame(
-                [{"指标": k.upper(), "贡献度": v} for k, v in sorted(pred["feature_contribution"].items(), key=lambda x: x[1], reverse=True)]
-            ).set_index("指标")
-            st.bar_chart(contrib_df)
-
-            if warning:
-                st.error("预警：随访趋势提示复发风险可能升高。")
-            else:
-                st.info("当前未触发复发风险预警。")
-            for note in notes:
-                st.write(f"- {note}")
+            _render_inference_result(
+                predicted_class=predicted_class,
+                probabilities=probabilities,
+                confidence=float(pred["confidence"]),
+                risk_level=risk_level,
+                feature_contribution=pred["feature_contribution"],
+                warning=warning,
+                notes=notes,
+            )
         except Exception as exc:
             st.error(f"评估失败：{exc}")
 
