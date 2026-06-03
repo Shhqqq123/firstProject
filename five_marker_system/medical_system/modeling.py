@@ -52,8 +52,11 @@ class BreastRiskModel:
         self.benign_min_pred_positive: int = 8
         self.benign_negative_class_weight: float = 1.35
         self.benign_positive_class_weight: float = 1.0
-        # Cap healthy samples for the benign expert so larger latest tables do not skew it.
-        self.benign_negative_max_ratio: float = 3.0
+        # Benign and healthy samples overlap heavily on the five-marker task.
+        # Keep the benign expert close to the validated standalone RF setup:
+        # balance healthy samples to benign samples before validation/training.
+        self.benign_random_state: int = 45
+        self.benign_negative_max_ratio: float = 1.0
         self.malignant_et_weight: float = 0.70
         self.malignant_rf_weight: float = 0.30
         self.malignant_calib_method: str = "isotonic"
@@ -193,6 +196,8 @@ class BreastRiskModel:
             "malignant_rf_weight": self.malignant_rf_weight,
             "malignant_calib_method": self.malignant_calib_method,
             "malignant_calib_cv": self.malignant_calib_cv,
+            "benign_random_state": self.benign_random_state,
+            "benign_negative_max_ratio": self.benign_negative_max_ratio,
             "malignant_models": self.malignant_models,
             "benign_models": self.benign_models,
             "malignant_model_type": self.malignant_model_type,
@@ -220,6 +225,8 @@ class BreastRiskModel:
         model.malignant_rf_weight = float(payload.get("malignant_rf_weight", 0.30))
         model.malignant_calib_method = str(payload.get("malignant_calib_method", "isotonic"))
         model.malignant_calib_cv = int(payload.get("malignant_calib_cv", 3))
+        model.benign_random_state = int(payload.get("benign_random_state", 45))
+        model.benign_negative_max_ratio = float(payload.get("benign_negative_max_ratio", 1.0))
         model.malignant_models = payload.get("malignant_models", [])
         model.benign_models = payload.get("benign_models", [])
         model.malignant_model_type = str(payload.get("malignant_model_type", "random_forest"))
@@ -398,18 +405,20 @@ class BreastRiskModel:
         if len(df_pos) < 10 or len(df_neg) < 10:
             raise ValueError(f"{task_name}样本不足，至少每类10条。")
 
+        task_seed = int(self.benign_random_state)
         max_neg = int(max(len(df_pos), len(df_pos) * self.benign_negative_max_ratio))
         if len(df_neg) > max_neg:
-            df_neg = df_neg.sample(n=max_neg, random_state=self.random_state).reset_index(drop=True)
+            df_neg = df_neg.sample(n=max_neg, random_state=task_seed).reset_index(drop=True)
 
         val_size = int(0.2 * min(len(df_pos), len(df_neg)))
         val_size = max(val_size, 1)
-        val_pos = df_pos.sample(n=val_size, random_state=self.random_state)
-        val_neg = df_neg.sample(n=val_size, random_state=self.random_state)
-        df_val = pd.concat([val_pos, val_neg], ignore_index=True).sample(frac=1.0, random_state=self.random_state)
+        val_pos = df_pos.sample(n=val_size, random_state=task_seed)
+        val_neg = df_neg.sample(n=val_size, random_state=task_seed)
+        df_val = pd.concat([val_pos, val_neg], ignore_index=True).sample(frac=1.0, random_state=task_seed)
 
         val_ids = set(df_val["unique_id"].tolist())
-        df_train_pool = subset[~subset["unique_id"].isin(val_ids)].reset_index(drop=True)
+        balanced_subset = pd.concat([df_pos, df_neg], ignore_index=True)
+        df_train_pool = balanced_subset[~balanced_subset["unique_id"].isin(val_ids)].reset_index(drop=True)
         df_train_pos = df_train_pool[df_train_pool["binary_label"] == 1].copy().reset_index(drop=True)
         df_train_neg = df_train_pool[df_train_pool["binary_label"] == 0].copy().reset_index(drop=True)
 
@@ -424,7 +433,7 @@ class BreastRiskModel:
         all_probs: list[np.ndarray] = []
         for i in range(self.n_models):
             if len(df_train_neg) >= n_pos_train:
-                neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=self.random_state + i).reset_index(
+                neg_sampled = df_train_neg.sample(n=n_pos_train, random_state=task_seed + i).reset_index(
                     drop=True
                 )
             else:
@@ -432,7 +441,7 @@ class BreastRiskModel:
 
             df_train = (
                 pd.concat([df_train_pos, neg_sampled], ignore_index=True)
-                .sample(frac=1.0, random_state=self.random_state + i)
+                .sample(frac=1.0, random_state=task_seed + i)
                 .reset_index(drop=True)
             )
             X_train = _prepare_feature_frame(df_train)
@@ -448,26 +457,8 @@ class BreastRiskModel:
                 n_jobs=-1,
             )
             rf.fit(X_train, y_train)
-
-            et = ExtraTreesClassifier(
-                n_estimators=160,
-                max_depth=None,
-                min_samples_split=2,
-                min_samples_leaf=2,
-                max_features="sqrt",
-                class_weight={0: self.benign_negative_class_weight, 1: self.benign_positive_class_weight},
-                random_state=3000 + i,
-                n_jobs=-1,
-            )
-            et.fit(X_train, y_train)
-
-            blend_model = {
-                "type": "mean_model_blend",
-                "models": [rf, et],
-                "weights": [0.55, 0.45],
-            }
-            models.append(blend_model)
-            all_probs.append(self._predict_model_proba(blend_model, X_val))
+            models.append(rf)
+            all_probs.append(self._predict_model_proba(rf, X_val))
 
         ensemble_prob = np.mean(all_probs, axis=0)
         threshold = self._find_best_threshold_benign(y_val, ensemble_prob)
@@ -484,7 +475,7 @@ class BreastRiskModel:
             "models": models,
             "metrics": metrics,
             "feature_importance": feature_importance,
-            "model_type": "rf_extra_trees_ensemble",
+            "model_type": "random_forest_ensemble",
             "threshold": float(threshold),
         }
 
