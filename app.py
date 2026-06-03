@@ -41,9 +41,11 @@ from medical_system.reporting import generate_report_html, generate_report_pdf
 from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn_class
 
 
+APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+
 st.set_page_config(
     page_title="乳腺风险评估系统",
-    page_icon=":hospital:",
+    page_icon=str(APP_ICON_PATH) if APP_ICON_PATH.exists() else ":hospital:",
     layout="wide",
 )
 ensure_directories()

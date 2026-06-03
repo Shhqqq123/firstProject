@@ -14,6 +14,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_PATH = BASE_DIR / "app.py"
+ICON_PATH = BASE_DIR / "assets" / "app_icon.ico"
 
 
 def _find_free_port() -> int:
@@ -120,7 +121,7 @@ def run_desktop(debug: bool = False, port: int | None = None) -> int:
 
     window.events.closed += _closed
     try:
-        webview.start(debug=debug)
+        webview.start(debug=debug, icon=str(ICON_PATH) if ICON_PATH.exists() else None)
     finally:
         _stop_process(proc)
     return 0

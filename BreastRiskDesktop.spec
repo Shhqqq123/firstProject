@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
-datas = [('app.py', '.'), ('medical_system', 'medical_system'), ('data', 'data')]
+datas = [('app.py', '.'), ('medical_system', 'medical_system'), ('data', 'data'), ('assets', 'assets')]
 binaries = []
 hiddenimports = [
     'streamlit.web.cli',
@@ -58,6 +58,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/app_icon.ico',
 )
 coll = COLLECT(
     exe,
