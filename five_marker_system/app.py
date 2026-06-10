@@ -52,7 +52,7 @@ def _load_page_icon() -> Image.Image | str:
 
 
 st.set_page_config(
-    page_title="乳腺健康智能筛查系统",
+    page_title="基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0",
     page_icon=_load_page_icon(),
     layout="wide",
 )
@@ -398,24 +398,23 @@ def _risk_visual_style(risk_level: str) -> tuple[str, str, str]:
 
 
 def _render_probability_table(probabilities: dict[str, float], predicted_class: str, accent_color: str) -> None:
-    rows = []
+    rows: list[str] = []
     for key, value in probabilities.items():
         percent = max(0.0, min(100.0, float(value) * 100.0))
         fill_color = accent_color if key == predicted_class else "#94a3b8"
         rows.append(
-            f"""
-            <tr>
-                <td><strong>{to_cn_class(key)}</strong></td>
-                <td>
-                    <div class="prob-track">
-                        <div class="prob-fill" style="width:{percent:.2f}%; background:{fill_color};"></div>
-                    </div>
-                </td>
-                <td style="text-align:right;"><strong>{percent:.2f}%</strong></td>
-            </tr>
-            """
+            "<tr>"
+            f"<td><strong>{html.escape(to_cn_class(key))}</strong></td>"
+            "<td>"
+            "<div class='prob-track'>"
+            f"<div class='prob-fill' style='width:{percent:.2f}%; background:{fill_color};'></div>"
+            "</div>"
+            "</td>"
+            f"<td style='text-align:right;'><strong>{percent:.2f}%</strong></td>"
+            "</tr>"
         )
-    st.markdown(f"<table class='prob-table'>{''.join(rows)}</table>", unsafe_allow_html=True)
+    table_html = "<table class='prob-table'><tbody>" + "".join(rows) + "</tbody></table>"
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def _render_inference_result(
@@ -594,7 +593,7 @@ def make_synthetic_training_data() -> pd.DataFrame:
 
 
 def login_page() -> None:
-    st.title("乳腺健康智能筛查系统")
+    st.title("基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0")
     st.caption("请先登录")
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("用户名")
@@ -635,7 +634,7 @@ def main() -> None:
         st.sidebar.markdown(
             """
             <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:-4px 0 14px;">
-                乳腺健康智能筛查系统
+                基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0
             </div>
             """,
             unsafe_allow_html=True,

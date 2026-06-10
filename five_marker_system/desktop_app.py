@@ -121,7 +121,7 @@ def run_desktop(debug: bool = False, port: int | None = None) -> int:
 
     url = f"http://127.0.0.1:{use_port}"
     window = webview.create_window(
-        title="乳腺健康智能筛查系统",
+        title="基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0",
         url=url,
         width=1480,
         height=920,
@@ -152,7 +152,7 @@ def run_smoke_test(port: int | None = None) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="乳腺健康智能筛查系统桌面启动器")
+    parser = argparse.ArgumentParser(description="基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0 桌面启动器")
     parser.add_argument("--debug", action="store_true", help="显示 Streamlit 日志并启用 webview 调试模式。")
     parser.add_argument("--port", type=int, default=None, help="指定内置服务端口（可选）。")
     parser.add_argument(
