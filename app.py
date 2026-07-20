@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from medical_system.config import CLASS_ORDER, FEATURE_COLUMNS, MODEL_PATH, REPORT_DIR, ensure_directories
+from medical_system.config import FEATURE_COLUMNS, MODEL_PATH, REPORT_DIR, ensure_directories
 from medical_system.database import (
     add_subject,
     add_test,
@@ -40,7 +40,7 @@ from medical_system.database import (
     update_user_password,
     update_user_role,
 )
-from medical_system.modeling import BreastRiskModel, _prepare_feature_frame
+from medical_system.modeling import BreastRiskModel
 from medical_system.reporting import generate_report_html, generate_report_pdf
 from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn_class
 
@@ -530,6 +530,30 @@ def _render_training_result(
                 unsafe_allow_html=True,
             )
 
+        if "two_stage_accuracy" in metrics:
+            st.markdown(
+                f"""
+                <div class="med-card task-card">
+                    <h4 style="color:#155e75; margin-top:0; border-bottom:1px solid #cffafe; padding-bottom:8px;">
+                        两阶段三分类决策（最终预测策略）
+                    </h4>
+                    <table>
+                        <tr><td>Accuracy 准确率</td><td><span class="badge badge-blue">{_format_metric(metrics, "two_stage_accuracy")}</span></td></tr>
+                        <tr><td>Balanced Accuracy 平衡准确率</td><td>{_format_metric(metrics, "two_stage_balanced_accuracy")}</td></tr>
+                        <tr><td>Macro Precision 宏平均精确率</td><td>{_format_metric(metrics, "two_stage_precision_macro")}</td></tr>
+                        <tr><td>Macro Recall 宏平均召回率</td><td>{_format_metric(metrics, "two_stage_recall_macro")}</td></tr>
+                        <tr><td>病变检出召回率</td><td>{_format_metric(metrics, "two_stage_disease_recall")}</td></tr>
+                        <tr><td>恶性召回率</td><td>{_format_metric(metrics, "two_stage_malignant_recall")}</td></tr>
+                        <tr><td>良性召回率</td><td>{_format_metric(metrics, "two_stage_benign_recall")}</td></tr>
+                        <tr><td>自动病变阈值</td><td>{_format_metric(metrics, "two_stage_disease_gate_threshold")}</td></tr>
+                        <tr><td>自动恶性阈值</td><td>{_format_metric(metrics, "two_stage_malignant_threshold")}</td></tr>
+                        <tr><td>验证集样本数</td><td>{_format_count(metrics, "two_stage_val_n")}（正常 {_format_count(metrics, "two_stage_val_normal_n")} / 良性 {_format_count(metrics, "two_stage_val_benign_n")} / 恶性 {_format_count(metrics, "two_stage_val_malignant_n")}）</td></tr>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
     _render_training_curves(curve_data)
 
     if class_distribution:
@@ -812,101 +836,14 @@ def _prepare_batch_prediction_frame(uploaded_df: pd.DataFrame) -> tuple[pd.DataF
     return df, feature_df
 
 
-def _predict_model_probability_array(model: BreastRiskModel, models: list[Any], X: pd.DataFrame) -> np.ndarray:
-    if not models:
-        return np.zeros(len(X), dtype=float)
-    probabilities = [model._predict_model_proba(sub_model, X) for sub_model in models]
-    return np.mean(probabilities, axis=0)
-
-
-def _predict_multiclass_probability_array(model: BreastRiskModel, X: pd.DataFrame) -> np.ndarray | None:
-    if not getattr(model, "multiclass_models", []):
-        return None
-    vectors = [model._predict_multiclass_model_proba(sub_model, X) for sub_model in model.multiclass_models]
-    if not vectors:
-        return None
-    probabilities = np.mean(vectors, axis=0)
-    totals = probabilities.sum(axis=1, keepdims=True)
-    totals[totals <= 0] = 1.0
-    return probabilities / totals
-
-
 def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame) -> pd.DataFrame:
     original_df, feature_df = _prepare_batch_prediction_frame(uploaded_df)
-    model_features = _prepare_feature_frame(feature_df)
-    p_malignant = np.clip(_predict_model_probability_array(model, model.malignant_models, model_features), 0.0, 1.0)
-    p_benign = np.clip(_predict_model_probability_array(model, model.benign_models, model_features), 0.0, 1.0)
-    p_benign_disease = (
-        np.clip(_predict_model_probability_array(model, model.benign_malignant_models, model_features), 0.0, 1.0)
-        if getattr(model, "benign_malignant_models", [])
-        else None
-    )
-    multiclass_probs = _predict_multiclass_probability_array(model, model_features)
-
+    predictions = model.predict_many(feature_df)
     rows: list[dict[str, Any]] = []
-    for idx in range(len(feature_df)):
-        m = float(p_malignant[idx])
-        b = float(p_benign[idx])
-        abnormal_score = max(m, b)
-        disease_total = m + b
-        marker_malignant_share = m / disease_total if disease_total > 0 else 0.5
-        if p_benign_disease is not None:
-            direct_malignant_share = 1.0 - float(p_benign_disease[idx])
-            malignant_share = float(np.clip(0.75 * marker_malignant_share + 0.25 * direct_malignant_share, 0.0, 1.0))
-        else:
-            malignant_share = marker_malignant_share
-        disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
-        probabilities = {
-            "normal": 1.0 - disease_mass,
-            "benign": disease_mass * (1.0 - malignant_share),
-            "malignant": disease_mass * malignant_share,
-        }
-
-        if multiclass_probs is not None:
-            multi_weight = 0.20
-            expert_weight = 1.0 - multi_weight
-            probabilities = {
-                key: float(
-                    multi_weight * multiclass_probs[idx, CLASS_ORDER.index(key)]
-                    + expert_weight * probabilities.get(key, 0.0)
-                )
-                for key in CLASS_ORDER
-            }
-
-        total = float(sum(probabilities.values()))
-        if total <= 0:
-            probabilities = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
-        else:
-            probabilities = {key: float(value / total) for key, value in probabilities.items()}
-
-        predicted_class = max(probabilities, key=probabilities.get)
-        disease_gate = float(getattr(model, "disease_gate_threshold", 0.25))
-        malignant_gate = float(getattr(model, "malignant_disease_threshold", 0.5))
-        if abnormal_score >= disease_gate and predicted_class == "normal":
-            if m >= malignant_gate:
-                predicted_class = "malignant"
-            else:
-                predicted_class = (
-                    "malignant" if probabilities.get("malignant", 0.0) >= probabilities.get("benign", 0.0) else "benign"
-                )
-        if (
-            m >= malignant_gate
-            and probabilities.get("malignant", 0.0) >= getattr(model, "malignant_guard_threshold", 0.34)
-            and probabilities.get("malignant", 0.0) + getattr(model, "malignant_guard_margin", 0.08)
-            >= probabilities.get("benign", 0.0)
-            and probabilities.get("malignant", 0.0) >= probabilities.get("normal", 0.0)
-        ):
-            predicted_class = "malignant"
-        if abnormal_score >= disease_gate and m >= malignant_gate:
-            predicted_class = "malignant"
-
-        max_other = max(value for key, value in probabilities.items() if key != predicted_class)
-        if probabilities[predicted_class] <= max_other:
-            probabilities[predicted_class] = max_other + 1e-6
-            total = float(sum(probabilities.values()))
-            probabilities = {key: float(value / total) for key, value in probabilities.items()}
-
-        confidence = float(probabilities[predicted_class])
+    for pred in predictions:
+        probabilities = pred["probabilities"]
+        predicted_class = pred["predicted_class"]
+        confidence = float(pred["confidence"])
         risk_level = get_risk_level(
             predicted_class=predicted_class,
             malignant_prob=probabilities.get("malignant", 0.0),

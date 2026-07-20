@@ -77,6 +77,7 @@ class BreastRiskModel:
         self.malignant_rf_weight: float = 0.30
         self.malignant_calib_method: str = "isotonic"
         self.malignant_calib_cv: int = 3
+        self.multiclass_weak_weight: float = 0.20
 
     def train(self, df: pd.DataFrame, test_size: float = 0.2) -> TrainResult:
         _ = test_size  # keep signature compatible
@@ -128,6 +129,9 @@ class BreastRiskModel:
             malignant_result["feature_importance"],
             benign_result["feature_importance"],
         )
+        two_stage_result = self._calibrate_two_stage_decision(multiclass_result["val_df"])
+        self.disease_gate_threshold = float(two_stage_result["disease_gate_threshold"])
+        self.malignant_disease_threshold = float(two_stage_result["malignant_disease_threshold"])
 
         metrics = {
             "auc": float(np.mean([malignant_result["metrics"]["auc_roc"], benign_result["metrics"]["auc_roc"]])),
@@ -172,6 +176,19 @@ class BreastRiskModel:
             "multiclass_val_normal_n": float(multiclass_result["metrics"].get("val_normal_n", 0)),
             "multiclass_val_benign_n": float(multiclass_result["metrics"].get("val_benign_n", 0)),
             "multiclass_val_malignant_n": float(multiclass_result["metrics"].get("val_malignant_n", 0)),
+            "two_stage_accuracy": float(two_stage_result["metrics"]["accuracy"]),
+            "two_stage_balanced_accuracy": float(two_stage_result["metrics"]["balanced_accuracy"]),
+            "two_stage_precision_macro": float(two_stage_result["metrics"]["precision_macro"]),
+            "two_stage_recall_macro": float(two_stage_result["metrics"]["recall_macro"]),
+            "two_stage_disease_recall": float(two_stage_result["metrics"]["disease_recall"]),
+            "two_stage_malignant_recall": float(two_stage_result["metrics"]["malignant_recall"]),
+            "two_stage_benign_recall": float(two_stage_result["metrics"]["benign_recall"]),
+            "two_stage_disease_gate_threshold": float(self.disease_gate_threshold),
+            "two_stage_malignant_threshold": float(self.malignant_disease_threshold),
+            "two_stage_val_n": float(two_stage_result["metrics"]["val_n"]),
+            "two_stage_val_normal_n": float(two_stage_result["metrics"]["val_normal_n"]),
+            "two_stage_val_benign_n": float(two_stage_result["metrics"]["val_benign_n"]),
+            "two_stage_val_malignant_n": float(two_stage_result["metrics"]["val_malignant_n"]),
         }
         self.train_metrics = metrics
         curve_data = {
@@ -186,78 +203,10 @@ class BreastRiskModel:
             raise ValueError("模型尚未训练或加载。")
 
         data = _prepare_feature_frame(sample_df)
-        p_malignant_raw = self._predict_binary_probability(self.malignant_models, data)
-        p_benign_raw = self._predict_binary_probability(self.benign_models, data)
-        p_benign_disease = self._predict_benign_vs_malignant_probability(data)
-        multiclass_probs = self._predict_multiclass_probabilities(data)
-
-        abnormal_score = max(float(p_malignant_raw), float(p_benign_raw))
-        m = float(np.clip(p_malignant_raw, 0.0, 1.0))
-        b = float(np.clip(p_benign_raw, 0.0, 1.0))
-        disease_total = m + b
-        marker_malignant_share = m / disease_total if disease_total > 0 else 0.5
-        if p_benign_disease is not None:
-            disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
-            direct_malignant_share = 1.0 - float(np.clip(p_benign_disease, 0.0, 1.0))
-            malignant_share = float(np.clip(0.75 * marker_malignant_share + 0.25 * direct_malignant_share, 0.0, 1.0))
-            benign_share = 1.0 - malignant_share
-            probs = {
-                "normal": 1.0 - disease_mass,
-                "benign": disease_mass * benign_share,
-                "malignant": disease_mass * malignant_share,
-            }
-        else:
-            disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
-            malignant_share = marker_malignant_share
-            benign_share = 1.0 - malignant_share
-            probs = {
-                "normal": 1.0 - disease_mass,
-                "benign": disease_mass * benign_share,
-                "malignant": disease_mass * malignant_share,
-            }
-
-        if multiclass_probs:
-            # The dedicated multiclass model is useful as a weak calibration signal,
-            # but small benign sample size makes it unstable enough that it should
-            # not dominate the binary disease experts.
-            multi_weight = 0.20
-            expert_weight = 1.0 - multi_weight
-            probs = {
-                key: float(multi_weight * multiclass_probs.get(key, 0.0) + expert_weight * probs.get(key, 0.0))
-                for key in CLASS_ORDER
-            }
-
-        total = float(sum(probs.values()))
-        if total <= 0:
-            probs = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
-        else:
-            probs = {k: float(v / total) for k, v in probs.items()}
-
-        predicted_class = max(probs, key=probs.get)
-        if abnormal_score >= self.disease_gate_threshold and predicted_class == "normal":
-            if m >= self.malignant_disease_threshold:
-                predicted_class = "malignant"
-            else:
-                predicted_class = "malignant" if probs.get("malignant", 0.0) >= probs.get("benign", 0.0) else "benign"
-
-        if (
-            m >= self.malignant_disease_threshold
-            and probs.get("malignant", 0.0) >= self.malignant_guard_threshold
-            and probs.get("malignant", 0.0) + self.malignant_guard_margin >= probs.get("benign", 0.0)
-            and probs.get("malignant", 0.0) >= probs.get("normal", 0.0)
-        ):
-            predicted_class = "malignant"
-        if abnormal_score >= self.disease_gate_threshold and m >= self.malignant_disease_threshold:
-            predicted_class = "malignant"
-
-        # Ensure the displayed probability ordering is consistent with gated decision.
-        max_other = max(v for k, v in probs.items() if k != predicted_class)
-        if probs[predicted_class] <= max_other:
-            probs[predicted_class] = max_other + 1e-6
-            total = float(sum(probs.values()))
-            probs = {k: float(v / total) for k, v in probs.items()}
-
-        confidence = float(probs[predicted_class])
+        decision = self._predict_prepared_batch(data)[0]
+        predicted_class = str(decision["predicted_class"])
+        probs = dict(decision["probabilities"])
+        confidence = float(decision["confidence"])
         contribution = self._sample_contribution(data.iloc[0])
 
         return {
@@ -266,6 +215,195 @@ class BreastRiskModel:
             "confidence": confidence,
             "feature_contribution": contribution,
         }
+
+    def predict_many(self, sample_df: pd.DataFrame) -> list[dict[str, Any]]:
+        if not self.malignant_models or not self.benign_models:
+            raise ValueError("Model is not trained or loaded.")
+        data = _prepare_feature_frame(sample_df)
+        return self._predict_prepared_batch(data)
+
+    def _predict_prepared_batch(self, X: pd.DataFrame) -> list[dict[str, Any]]:
+        p_malignant = np.clip(self._predict_binary_probability_array(self.malignant_models, X), 0.0, 1.0)
+        p_benign = np.clip(self._predict_binary_probability_array(self.benign_models, X), 0.0, 1.0)
+        p_benign_disease = (
+            np.clip(self._predict_binary_probability_array(self.benign_malignant_models, X), 0.0, 1.0)
+            if self.benign_malignant_models
+            else None
+        )
+        multiclass_probs = self._predict_multiclass_probabilities_array(X)
+        abnormal_score, malignancy_score, probability_rows = self._build_two_stage_scores(
+            p_malignant=p_malignant,
+            p_benign=p_benign,
+            p_benign_disease=p_benign_disease,
+            multiclass_probs=multiclass_probs,
+        )
+
+        decisions: list[dict[str, Any]] = []
+        for idx, probs in enumerate(probability_rows):
+            if abnormal_score[idx] < self.disease_gate_threshold:
+                predicted_class = "normal"
+            elif malignancy_score[idx] >= self.malignant_disease_threshold:
+                predicted_class = "malignant"
+            else:
+                predicted_class = "benign"
+
+            max_other = max(value for key, value in probs.items() if key != predicted_class)
+            if probs[predicted_class] <= max_other:
+                probs = dict(probs)
+                probs[predicted_class] = max_other + 1e-6
+                total = float(sum(probs.values()))
+                probs = {key: float(value / total) for key, value in probs.items()}
+
+            decisions.append(
+                {
+                    "predicted_class": predicted_class,
+                    "probabilities": probs,
+                    "confidence": float(probs[predicted_class]),
+                    "abnormal_score": float(abnormal_score[idx]),
+                    "malignancy_score": float(malignancy_score[idx]),
+                }
+            )
+        return decisions
+
+    def _build_two_stage_scores(
+        self,
+        p_malignant: np.ndarray,
+        p_benign: np.ndarray,
+        p_benign_disease: np.ndarray | None = None,
+        multiclass_probs: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]]]:
+        p_malignant = np.asarray(p_malignant, dtype=float)
+        p_benign = np.asarray(p_benign, dtype=float)
+        abnormal_score = np.maximum(p_malignant, p_benign)
+        disease_total = p_malignant + p_benign
+        marker_malignant_share = np.divide(
+            p_malignant,
+            disease_total,
+            out=np.full_like(p_malignant, 0.5, dtype=float),
+            where=disease_total > 0,
+        )
+        if p_benign_disease is not None:
+            direct_malignant_share = 1.0 - np.asarray(p_benign_disease, dtype=float)
+            malignancy_score = np.clip(0.75 * marker_malignant_share + 0.25 * direct_malignant_share, 0.0, 1.0)
+        else:
+            malignancy_score = np.clip(marker_malignant_share, 0.0, 1.0)
+
+        probability_rows: list[dict[str, float]] = []
+        for idx in range(len(p_malignant)):
+            disease_mass = float(np.clip(abnormal_score[idx], 0.0, 1.0))
+            malignant_share = float(np.clip(malignancy_score[idx], 0.0, 1.0))
+            probs = {
+                "normal": 1.0 - disease_mass,
+                "benign": disease_mass * (1.0 - malignant_share),
+                "malignant": disease_mass * malignant_share,
+            }
+            if multiclass_probs is not None:
+                probs = {
+                    key: float(
+                        self.multiclass_weak_weight * multiclass_probs[idx, CLASS_ORDER.index(key)]
+                        + (1.0 - self.multiclass_weak_weight) * probs.get(key, 0.0)
+                    )
+                    for key in CLASS_ORDER
+                }
+            total = float(sum(probs.values()))
+            if total <= 0:
+                probs = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
+            else:
+                probs = {key: float(value / total) for key, value in probs.items()}
+            probability_rows.append(probs)
+        return abnormal_score, malignancy_score, probability_rows
+
+    def _calibrate_two_stage_decision(self, val_df: pd.DataFrame) -> dict[str, Any]:
+        X_val = _prepare_feature_frame(val_df)
+        y_val = val_df[LABEL_COLUMN].astype(str).to_numpy()
+        p_malignant = np.clip(self._predict_binary_probability_array(self.malignant_models, X_val), 0.0, 1.0)
+        p_benign = np.clip(self._predict_binary_probability_array(self.benign_models, X_val), 0.0, 1.0)
+        p_benign_disease = (
+            np.clip(self._predict_binary_probability_array(self.benign_malignant_models, X_val), 0.0, 1.0)
+            if self.benign_malignant_models
+            else None
+        )
+        multiclass_probs = self._predict_multiclass_probabilities_array(X_val)
+        abnormal_score, malignancy_score, _ = self._build_two_stage_scores(
+            p_malignant=p_malignant,
+            p_benign=p_benign,
+            p_benign_disease=p_benign_disease,
+            multiclass_probs=multiclass_probs,
+        )
+
+        y_disease = (y_val != "normal").astype(int)
+        disease_candidates = self._threshold_candidates(abnormal_score, low=0.05, high=0.80)
+        disease_options: list[tuple[float, float, float]] = []
+        for threshold in disease_candidates:
+            pred_disease = (abnormal_score >= threshold).astype(int)
+            recall = recall_score(y_disease, pred_disease, zero_division=0)
+            balanced = balanced_accuracy_score(y_disease, pred_disease)
+            disease_options.append((balanced + 0.10 * recall, float(threshold), float(recall)))
+
+        feasible_disease = [item for item in disease_options if item[2] >= 0.90]
+        if not feasible_disease:
+            feasible_disease = [item for item in disease_options if item[2] >= 0.85]
+        disease_gate = max(feasible_disease or disease_options, key=lambda item: item[0])[1]
+
+        diseased_mask = y_val != "normal"
+        y_malignant = (y_val[diseased_mask] == "malignant").astype(int)
+        malignant_scores = malignancy_score[diseased_mask]
+        malignant_candidates = self._threshold_candidates(malignant_scores, low=0.20, high=0.80)
+        malignant_options: list[tuple[float, float, float]] = []
+        true_malignant_rate = float(np.mean(y_malignant)) if len(y_malignant) else 0.5
+        for threshold in malignant_candidates:
+            pred_malignant = (malignant_scores >= threshold).astype(int)
+            recall = recall_score(y_malignant, pred_malignant, zero_division=0)
+            balanced = balanced_accuracy_score(y_malignant, pred_malignant)
+            pred_rate = float(np.mean(pred_malignant)) if len(pred_malignant) else 0.0
+            score = balanced + 0.08 * recall - 0.03 * abs(pred_rate - true_malignant_rate)
+            malignant_options.append((score, float(threshold), float(recall)))
+
+        feasible_malignant = [item for item in malignant_options if item[2] >= 0.65]
+        malignant_gate = max(feasible_malignant or malignant_options, key=lambda item: item[0])[1]
+
+        y_pred = self._apply_two_stage_thresholds(abnormal_score, malignancy_score, disease_gate, malignant_gate)
+        disease_pred = (np.asarray(y_pred) != "normal").astype(int)
+        metrics = {
+            "accuracy": float(accuracy_score(y_val, y_pred)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_val, y_pred)),
+            "precision_macro": float(precision_score(y_val, y_pred, average="macro", zero_division=0)),
+            "recall_macro": float(recall_score(y_val, y_pred, average="macro", zero_division=0)),
+            "disease_recall": float(recall_score(y_disease, disease_pred, zero_division=0)),
+            "malignant_recall": float(recall_score(y_val == "malignant", np.asarray(y_pred) == "malignant", zero_division=0)),
+            "benign_recall": float(recall_score(y_val == "benign", np.asarray(y_pred) == "benign", zero_division=0)),
+            "val_n": float(len(y_val)),
+            "val_normal_n": float(np.sum(y_val == "normal")),
+            "val_benign_n": float(np.sum(y_val == "benign")),
+            "val_malignant_n": float(np.sum(y_val == "malignant")),
+        }
+        return {
+            "disease_gate_threshold": float(disease_gate),
+            "malignant_disease_threshold": float(malignant_gate),
+            "metrics": metrics,
+        }
+
+    def _apply_two_stage_thresholds(
+        self,
+        abnormal_score: np.ndarray,
+        malignancy_score: np.ndarray,
+        disease_gate: float,
+        malignant_gate: float,
+    ) -> np.ndarray:
+        predictions = np.full(len(abnormal_score), "normal", dtype=object)
+        disease_mask = abnormal_score >= disease_gate
+        predictions[disease_mask] = np.where(malignancy_score[disease_mask] >= malignant_gate, "malignant", "benign")
+        return predictions
+
+    def _threshold_candidates(self, values: np.ndarray, low: float, high: float) -> np.ndarray:
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        dense = np.linspace(low, high, 151)
+        if values.size == 0:
+            return dense
+        unique = np.unique(np.clip(values, low, high))
+        mids = (unique[:-1] + unique[1:]) / 2.0 if unique.size > 1 else np.array([], dtype=float)
+        return np.unique(np.concatenate([dense, unique, mids]))
 
     def predict_disease_only(self, sample_df: pd.DataFrame) -> dict[str, Any]:
         """Predict only between benign and malignant for external diseased validation sets."""
@@ -304,6 +442,7 @@ class BreastRiskModel:
             "malignant_rf_weight": self.malignant_rf_weight,
             "malignant_calib_method": self.malignant_calib_method,
             "malignant_calib_cv": self.malignant_calib_cv,
+            "multiclass_weak_weight": self.multiclass_weak_weight,
             "malignant_models": self.malignant_models,
             "benign_models": self.benign_models,
             "benign_malignant_models": self.benign_malignant_models,
@@ -340,6 +479,7 @@ class BreastRiskModel:
         model.malignant_rf_weight = float(payload.get("malignant_rf_weight", 0.30))
         model.malignant_calib_method = str(payload.get("malignant_calib_method", "isotonic"))
         model.malignant_calib_cv = int(payload.get("malignant_calib_cv", 3))
+        model.multiclass_weak_weight = float(payload.get("multiclass_weak_weight", model.multiclass_weak_weight))
         model.malignant_models = payload.get("malignant_models", [])
         model.benign_models = payload.get("benign_models", [])
         model.benign_malignant_models = payload.get("benign_malignant_models", [])
@@ -844,35 +984,33 @@ class BreastRiskModel:
         probs = [self._predict_model_proba(model, X)[0] for model in models]
         return float(np.mean(probs))
 
+    def _predict_binary_probability_array(self, models: list[Any], X: pd.DataFrame) -> np.ndarray:
+        if not models:
+            return np.zeros(len(X), dtype=float)
+        probs = [self._predict_model_proba(model, X) for model in models]
+        return np.mean(probs, axis=0)
+
     def _predict_benign_vs_malignant_probability(self, X: pd.DataFrame) -> float | None:
         if not self.benign_malignant_models:
             return None
         return self._predict_binary_probability(self.benign_malignant_models, X)
 
     def _predict_multiclass_probabilities(self, X: pd.DataFrame) -> dict[str, float] | None:
+        avg = self._predict_multiclass_probabilities_array(X)
+        if avg is None or len(avg) == 0:
+            return None
+        return {class_name: float(avg[0, idx]) for idx, class_name in enumerate(CLASS_ORDER)}
+
+    def _predict_multiclass_probabilities_array(self, X: pd.DataFrame) -> np.ndarray | None:
         if not self.multiclass_models:
             return None
-
-        vectors: list[np.ndarray] = []
-        for model in self.multiclass_models:
-            proba = np.asarray(model.predict_proba(X))[0]
-            aligned = np.zeros(len(CLASS_ORDER), dtype=float)
-            for idx, class_name in enumerate(getattr(model, "classes_", [])):
-                if class_name in CLASS_ORDER:
-                    aligned[CLASS_ORDER.index(str(class_name))] = float(proba[idx])
-            total = float(aligned.sum())
-            if total > 0:
-                vectors.append(aligned / total)
-
+        vectors = [self._predict_multiclass_model_proba(model, X) for model in self.multiclass_models]
         if not vectors:
             return None
-
         avg = np.mean(vectors, axis=0)
-        total = float(avg.sum())
-        if total <= 0:
-            return None
-        avg = avg / total
-        return {class_name: float(avg[idx]) for idx, class_name in enumerate(CLASS_ORDER)}
+        totals = avg.sum(axis=1, keepdims=True)
+        totals[totals <= 0] = 1.0
+        return avg / totals
 
     def _train_multiclass_task(self, data: pd.DataFrame) -> dict[str, Any]:
         subset = data[data[LABEL_COLUMN].isin(CLASS_ORDER)].copy().reset_index(drop=True)
@@ -941,6 +1079,7 @@ class BreastRiskModel:
             "metrics": metrics,
             "feature_importance": self._average_feature_importance(models),
             "model_type": "balanced_multiclass_ensemble",
+            "val_df": val_df,
         }
 
     def _balanced_multiclass_training_frame(self, train_df: pd.DataFrame, seed: int) -> pd.DataFrame:
