@@ -59,6 +59,8 @@ class BreastRiskModel:
         self.malignant_threshold: float = 0.5
         self.benign_threshold: float = 0.5
         self.benign_malignant_threshold: float = 0.5
+        self.disease_gate_threshold: float = 0.25
+        self.malignant_disease_threshold: float = 0.5
         self.malignant_guard_threshold: float = 0.34
         self.malignant_guard_margin: float = 0.08
         self.global_feature_importance: dict[str, float] = {}
@@ -192,22 +194,22 @@ class BreastRiskModel:
         abnormal_score = max(float(p_malignant_raw), float(p_benign_raw))
         m = float(np.clip(p_malignant_raw, 0.0, 1.0))
         b = float(np.clip(p_benign_raw, 0.0, 1.0))
+        disease_total = m + b
+        marker_malignant_share = m / disease_total if disease_total > 0 else 0.5
         if p_benign_disease is not None:
             disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
-            benign_share = float(np.clip(p_benign_disease, 0.0, 1.0))
+            direct_malignant_share = 1.0 - float(np.clip(p_benign_disease, 0.0, 1.0))
+            malignant_share = float(np.clip(0.75 * marker_malignant_share + 0.25 * direct_malignant_share, 0.0, 1.0))
+            benign_share = 1.0 - malignant_share
             probs = {
                 "normal": 1.0 - disease_mass,
                 "benign": disease_mass * benign_share,
-                "malignant": disease_mass * (1.0 - benign_share),
+                "malignant": disease_mass * malignant_share,
             }
         else:
             disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
-            disease_total = m + b
-            if disease_total > 0:
-                malignant_share = m / disease_total
-                benign_share = b / disease_total
-            else:
-                malignant_share = benign_share = 0.5
+            malignant_share = marker_malignant_share
+            benign_share = 1.0 - malignant_share
             probs = {
                 "normal": 1.0 - disease_mass,
                 "benign": disease_mass * benign_share,
@@ -215,7 +217,10 @@ class BreastRiskModel:
             }
 
         if multiclass_probs:
-            multi_weight = 0.60
+            # The dedicated multiclass model is useful as a weak calibration signal,
+            # but small benign sample size makes it unstable enough that it should
+            # not dominate the binary disease experts.
+            multi_weight = 0.20
             expert_weight = 1.0 - multi_weight
             probs = {
                 key: float(multi_weight * multiclass_probs.get(key, 0.0) + expert_weight * probs.get(key, 0.0))
@@ -229,11 +234,20 @@ class BreastRiskModel:
             probs = {k: float(v / total) for k, v in probs.items()}
 
         predicted_class = max(probs, key=probs.get)
+        if abnormal_score >= self.disease_gate_threshold and predicted_class == "normal":
+            if m >= self.malignant_disease_threshold:
+                predicted_class = "malignant"
+            else:
+                predicted_class = "malignant" if probs.get("malignant", 0.0) >= probs.get("benign", 0.0) else "benign"
+
         if (
-            probs.get("malignant", 0.0) >= self.malignant_guard_threshold
+            m >= self.malignant_disease_threshold
+            and probs.get("malignant", 0.0) >= self.malignant_guard_threshold
             and probs.get("malignant", 0.0) + self.malignant_guard_margin >= probs.get("benign", 0.0)
             and probs.get("malignant", 0.0) >= probs.get("normal", 0.0)
         ):
+            predicted_class = "malignant"
+        if abnormal_score >= self.disease_gate_threshold and m >= self.malignant_disease_threshold:
             predicted_class = "malignant"
 
         # Ensure the displayed probability ordering is consistent with gated decision.
@@ -301,6 +315,8 @@ class BreastRiskModel:
             "malignant_threshold": self.malignant_threshold,
             "benign_threshold": self.benign_threshold,
             "benign_malignant_threshold": self.benign_malignant_threshold,
+            "disease_gate_threshold": self.disease_gate_threshold,
+            "malignant_disease_threshold": self.malignant_disease_threshold,
             "malignant_guard_threshold": self.malignant_guard_threshold,
             "malignant_guard_margin": self.malignant_guard_margin,
             "global_feature_importance": self.global_feature_importance,
@@ -335,6 +351,10 @@ class BreastRiskModel:
         model.malignant_threshold = float(payload.get("malignant_threshold", 0.5))
         model.benign_threshold = float(payload.get("benign_threshold", 0.5))
         model.benign_malignant_threshold = float(payload.get("benign_malignant_threshold", 0.5))
+        model.disease_gate_threshold = float(payload.get("disease_gate_threshold", model.disease_gate_threshold))
+        model.malignant_disease_threshold = float(
+            payload.get("malignant_disease_threshold", model.malignant_disease_threshold)
+        )
         model.malignant_guard_threshold = float(payload.get("malignant_guard_threshold", 0.34))
         model.malignant_guard_margin = float(payload.get("malignant_guard_margin", 0.08))
         model.global_feature_importance = payload.get("global_feature_importance", {})

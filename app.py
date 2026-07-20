@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from medical_system.config import FEATURE_COLUMNS, MODEL_PATH, REPORT_DIR, ensure_directories
+from medical_system.config import CLASS_ORDER, FEATURE_COLUMNS, MODEL_PATH, REPORT_DIR, ensure_directories
 from medical_system.database import (
     add_subject,
     add_test,
@@ -40,7 +40,7 @@ from medical_system.database import (
     update_user_password,
     update_user_role,
 )
-from medical_system.modeling import BreastRiskModel
+from medical_system.modeling import BreastRiskModel, _prepare_feature_frame
 from medical_system.reporting import generate_report_html, generate_report_pdf
 from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn_class
 
@@ -812,23 +812,111 @@ def _prepare_batch_prediction_frame(uploaded_df: pd.DataFrame) -> tuple[pd.DataF
     return df, feature_df
 
 
-def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame, mode: str = "三分类") -> pd.DataFrame:
+def _predict_model_probability_array(model: BreastRiskModel, models: list[Any], X: pd.DataFrame) -> np.ndarray:
+    if not models:
+        return np.zeros(len(X), dtype=float)
+    probabilities = [model._predict_model_proba(sub_model, X) for sub_model in models]
+    return np.mean(probabilities, axis=0)
+
+
+def _predict_multiclass_probability_array(model: BreastRiskModel, X: pd.DataFrame) -> np.ndarray | None:
+    if not getattr(model, "multiclass_models", []):
+        return None
+    vectors = [model._predict_multiclass_model_proba(sub_model, X) for sub_model in model.multiclass_models]
+    if not vectors:
+        return None
+    probabilities = np.mean(vectors, axis=0)
+    totals = probabilities.sum(axis=1, keepdims=True)
+    totals[totals <= 0] = 1.0
+    return probabilities / totals
+
+
+def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame) -> pd.DataFrame:
     original_df, feature_df = _prepare_batch_prediction_frame(uploaded_df)
+    model_features = _prepare_feature_frame(feature_df)
+    p_malignant = np.clip(_predict_model_probability_array(model, model.malignant_models, model_features), 0.0, 1.0)
+    p_benign = np.clip(_predict_model_probability_array(model, model.benign_models, model_features), 0.0, 1.0)
+    p_benign_disease = (
+        np.clip(_predict_model_probability_array(model, model.benign_malignant_models, model_features), 0.0, 1.0)
+        if getattr(model, "benign_malignant_models", [])
+        else None
+    )
+    multiclass_probs = _predict_multiclass_probability_array(model, model_features)
+
     rows: list[dict[str, Any]] = []
     for idx in range(len(feature_df)):
-        pred = model.predict_disease_only(feature_df.iloc[[idx]]) if mode == "良性/恶性二分类" else model.predict(feature_df.iloc[[idx]])
-        probabilities = pred["probabilities"]
-        predicted_class = pred["predicted_class"]
+        m = float(p_malignant[idx])
+        b = float(p_benign[idx])
+        abnormal_score = max(m, b)
+        disease_total = m + b
+        marker_malignant_share = m / disease_total if disease_total > 0 else 0.5
+        if p_benign_disease is not None:
+            direct_malignant_share = 1.0 - float(p_benign_disease[idx])
+            malignant_share = float(np.clip(0.75 * marker_malignant_share + 0.25 * direct_malignant_share, 0.0, 1.0))
+        else:
+            malignant_share = marker_malignant_share
+        disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
+        probabilities = {
+            "normal": 1.0 - disease_mass,
+            "benign": disease_mass * (1.0 - malignant_share),
+            "malignant": disease_mass * malignant_share,
+        }
+
+        if multiclass_probs is not None:
+            multi_weight = 0.20
+            expert_weight = 1.0 - multi_weight
+            probabilities = {
+                key: float(
+                    multi_weight * multiclass_probs[idx, CLASS_ORDER.index(key)]
+                    + expert_weight * probabilities.get(key, 0.0)
+                )
+                for key in CLASS_ORDER
+            }
+
+        total = float(sum(probabilities.values()))
+        if total <= 0:
+            probabilities = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
+        else:
+            probabilities = {key: float(value / total) for key, value in probabilities.items()}
+
+        predicted_class = max(probabilities, key=probabilities.get)
+        disease_gate = float(getattr(model, "disease_gate_threshold", 0.25))
+        malignant_gate = float(getattr(model, "malignant_disease_threshold", 0.5))
+        if abnormal_score >= disease_gate and predicted_class == "normal":
+            if m >= malignant_gate:
+                predicted_class = "malignant"
+            else:
+                predicted_class = (
+                    "malignant" if probabilities.get("malignant", 0.0) >= probabilities.get("benign", 0.0) else "benign"
+                )
+        if (
+            m >= malignant_gate
+            and probabilities.get("malignant", 0.0) >= getattr(model, "malignant_guard_threshold", 0.34)
+            and probabilities.get("malignant", 0.0) + getattr(model, "malignant_guard_margin", 0.08)
+            >= probabilities.get("benign", 0.0)
+            and probabilities.get("malignant", 0.0) >= probabilities.get("normal", 0.0)
+        ):
+            predicted_class = "malignant"
+        if abnormal_score >= disease_gate and m >= malignant_gate:
+            predicted_class = "malignant"
+
+        max_other = max(value for key, value in probabilities.items() if key != predicted_class)
+        if probabilities[predicted_class] <= max_other:
+            probabilities[predicted_class] = max_other + 1e-6
+            total = float(sum(probabilities.values()))
+            probabilities = {key: float(value / total) for key, value in probabilities.items()}
+
+        confidence = float(probabilities[predicted_class])
         risk_level = get_risk_level(
             predicted_class=predicted_class,
             malignant_prob=probabilities.get("malignant", 0.0),
-            confidence=float(pred["confidence"]),
+            confidence=confidence,
         )
         rows.append(
             {
                 "预测类别": to_cn_class(predicted_class),
                 "风险等级": risk_level,
-                "可信度": round(float(pred["confidence"]), 4),
+                "可信度": round(confidence, 4),
                 "正常概率": round(float(probabilities.get("normal", 0.0)), 4),
                 "良性概率": round(float(probabilities.get("benign", 0.0)), 4),
                 "恶性概率": round(float(probabilities.get("malignant", 0.0)), 4),
@@ -894,6 +982,16 @@ def _render_batch_validation_metrics(result_df: pd.DataFrame) -> None:
     accuracy = float((y_true == y_pred).mean())
     st.markdown("<div class='sub-section-title'>批量验证统计</div>", unsafe_allow_html=True)
     st.metric("验证集准确率", f"{accuracy:.4f}", help=f"真实标签列：{truth_col}，有效样本数：{len(y_true)}")
+    true_labels = set(y_true.dropna().unique())
+    if true_labels and "正常" not in true_labels:
+        disease_mask = y_true.isin(["良性", "恶性"])
+        disease_detected = y_pred[disease_mask].isin(["良性", "恶性"])
+        detection_rate = float(disease_detected.mean()) if len(disease_detected) else 0.0
+        st.info(
+            "当前验证文件没有正常样本，因此三分类准确率会把“预测正常”计为错误。"
+            "系统仍然只做一次三分类预测；下面额外显示病变检出率，便于判断是否漏判为正常。"
+        )
+        st.metric("病变检出率", f"{detection_rate:.4f}", help="真实为良性/恶性的样本中，预测没有落到正常类的比例。")
     matrix = pd.crosstab(y_true, y_pred, rownames=["真实类别"], colnames=["预测类别"], dropna=False)
     st.dataframe(matrix, use_container_width=True)
 
@@ -945,16 +1043,6 @@ def _render_batch_prediction_panel(model: BreastRiskModel) -> None:
         "CA242 等其他列会保留但不参与预测。"
     )
 
-    prediction_mode = st.radio(
-        "批量预测模式",
-        ["常规三分类", "良性/恶性二分类"],
-        horizontal=True,
-        help="验证集如果只有良性和恶性样本，请选择良性/恶性二分类；常规临床筛查请选择常规三分类。",
-    )
-    prediction_mode_key = "良性/恶性二分类" if prediction_mode == "良性/恶性二分类" else "三分类"
-    if prediction_mode == "良性/恶性二分类" and not getattr(model, "benign_malignant_models", []):
-        st.warning("当前模型还没有良性vs恶性直接判别专家。请先在“模型训练”页面重新训练一次模型。")
-
     template_df = pd.DataFrame(
         [
             {
@@ -995,13 +1083,12 @@ def _render_batch_prediction_panel(model: BreastRiskModel) -> None:
     if st.button("开始批量预测", type="primary", use_container_width=True):
         try:
             with st.spinner("正在批量预测，请稍候..."):
-                result_df = _run_batch_prediction(model, batch_df, mode=prediction_mode_key)
+                result_df = _run_batch_prediction(model, batch_df)
                 saved_path = _save_batch_prediction_result(result_df)
             st.session_state["last_batch_prediction_result"] = result_df
             st.session_state["last_batch_prediction_file"] = str(uploaded.name)
-            st.session_state["last_batch_prediction_mode"] = prediction_mode
             st.session_state["last_batch_prediction_saved_path"] = str(saved_path)
-            audit("batch_inference", "ml", "batch_prediction", None, {"rows": int(len(result_df)), "mode": prediction_mode})
+            audit("batch_inference", "ml", "batch_prediction", None, {"rows": int(len(result_df)), "mode": "三分类"})
         except Exception as exc:
             st.error(f"批量预测失败：{exc}")
             return
@@ -1009,7 +1096,6 @@ def _render_batch_prediction_panel(model: BreastRiskModel) -> None:
     result_df = (
         st.session_state.get("last_batch_prediction_result")
         if st.session_state.get("last_batch_prediction_file") == str(uploaded.name)
-        and st.session_state.get("last_batch_prediction_mode") == prediction_mode
         else None
     )
     if isinstance(result_df, pd.DataFrame):
