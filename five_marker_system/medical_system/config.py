@@ -1,13 +1,35 @@
+import os
+import sys
 from pathlib import Path
 
 # 项目根目录（app.py 所在目录）
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _resolve_runtime_dir() -> Path:
+    """Return a writable runtime directory for installed desktop builds."""
+    override = os.environ.get("BREAST_HEALTH_FIVE_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    base_text = str(BASE_DIR).lower()
+    is_installed_app = getattr(sys, "frozen", False) or "\\program files\\" in base_text or "/program files/" in base_text
+    if is_installed_app:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "BreastHealthFiveMarkerDesktop"
+        return Path.home() / "AppData" / "Local" / "BreastHealthFiveMarkerDesktop"
+
+    return BASE_DIR
+
+
+RUNTIME_DIR = _resolve_runtime_dir()
 # 运行数据目录
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = RUNTIME_DIR / "data"
 # 模型目录
-MODEL_DIR = BASE_DIR / "models"
+MODEL_DIR = RUNTIME_DIR / "models"
 # 报告目录
-REPORT_DIR = BASE_DIR / "reports"
+REPORT_DIR = RUNTIME_DIR / "reports"
 
 # SQLite 数据库文件路径
 DB_PATH = DATA_DIR / "medical_system.db"

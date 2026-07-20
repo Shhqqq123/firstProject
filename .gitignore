@@ -4,6 +4,7 @@ __pycache__/
 models/
 reports/
 data/medical_system.db
+codex_memory/
 build/
 dist/
 RelevantDocuments/

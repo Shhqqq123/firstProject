@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
-$ExePath = Join-Path $ProjectRoot "dist\BreastRiskDesktop\BreastRiskDesktop.exe"
+$ExePath = Join-Path $ProjectRoot "dist\BreastHealthFiveMarkerDesktop\BreastHealthFiveMarkerDesktop.exe"
 if (-not (Test-Path $ExePath)) {
     & (Join-Path $ProjectRoot "scripts\build_desktop.ps1")
 }
@@ -45,7 +45,7 @@ if (-not $isccPath) {
 $issPath = Join-Path $ProjectRoot "installer\BreastRiskDesktop.iss"
 & $isccPath $issPath
 
-$setupPath = Join-Path $ProjectRoot "dist\installer\BreastRiskDesktop_Setup.exe"
+$setupPath = Join-Path $ProjectRoot "dist\installer\BreastHealthFiveMarker_Setup.exe"
 if (-not (Test-Path $setupPath)) {
     throw "Installer build failed: $setupPath was not generated."
 }

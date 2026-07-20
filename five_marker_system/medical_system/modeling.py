@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_recall_curve, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import train_test_split
 
 from .config import FEATURE_COLUMNS, FEATURE_PREPROCESSING_VERSION, LABEL_COLUMN
@@ -25,6 +33,7 @@ except Exception:  # pragma: no cover - optional dependency
 class TrainResult:
     metrics: dict[str, float]
     class_distribution: dict[str, int]
+    curve_data: dict[str, Any] | None = None
 
 
 class BreastRiskModel:
@@ -108,16 +117,22 @@ class BreastRiskModel:
             "recall": float(np.mean([malignant_result["metrics"]["recall"], benign_result["metrics"]["recall"]])),
             "accuracy": float(np.mean([malignant_result["metrics"]["accuracy"], benign_result["metrics"]["accuracy"]])),
             "malignant_auc": float(malignant_result["metrics"]["auc_roc"]),
+            "malignant_auc_pr": float(malignant_result["metrics"]["auc_pr"]),
             "malignant_precision": float(malignant_result["metrics"]["precision"]),
             "malignant_recall": float(malignant_result["metrics"]["recall"]),
             "malignant_accuracy": float(malignant_result["metrics"]["accuracy"]),
             "benign_auc": float(benign_result["metrics"]["auc_roc"]),
+            "benign_auc_pr": float(benign_result["metrics"]["auc_pr"]),
             "benign_precision": float(benign_result["metrics"]["precision"]),
             "benign_recall": float(benign_result["metrics"]["recall"]),
             "benign_accuracy": float(benign_result["metrics"]["accuracy"]),
         }
         self.train_metrics = metrics
-        return TrainResult(metrics=metrics, class_distribution=class_distribution)
+        curve_data = {
+            "malignant": malignant_result.get("curve_data", {}),
+            "benign": benign_result.get("curve_data", {}),
+        }
+        return TrainResult(metrics=metrics, class_distribution=class_distribution, curve_data=curve_data)
 
     def predict(self, sample_df: pd.DataFrame) -> dict[str, Any]:
         if not self.malignant_models or not self.benign_models:
@@ -313,6 +328,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -324,6 +340,7 @@ class BreastRiskModel:
         return {
             "models": models,
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": feature_importance,
             "model_type": model_type,
             "threshold": float(threshold),
@@ -371,6 +388,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -379,6 +397,7 @@ class BreastRiskModel:
         return {
             "models": [blend_model],
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": self._average_feature_importance([blend_model]),
             "model_type": "et_rf_isotonic_blend",
             "threshold": float(threshold),
@@ -466,6 +485,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -474,6 +494,7 @@ class BreastRiskModel:
         return {
             "models": models,
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": feature_importance,
             "model_type": "random_forest_ensemble",
             "threshold": float(threshold),
@@ -594,6 +615,20 @@ class BreastRiskModel:
             "pred_pos": float(int(y_pred.sum())),
             "min_pr_acc": float(min(precision, recall, accuracy)),
             "avg_pr_acc": float((precision + recall + accuracy) / 3.0),
+        }
+
+    def _build_curve_data(self, y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, Any]:
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_prob, pos_label=1)
+        positive_rate = float(np.mean(y_true == 1))
+        return {
+            "fpr": [float(v) for v in fpr],
+            "tpr": [float(v) for v in tpr],
+            "precision": [float(v) for v in precision_vals],
+            "recall": [float(v) for v in recall_vals],
+            "positive_rate": positive_rate,
+            "auc_roc": float(roc_auc_score(y_true, y_prob)),
+            "auc_pr": float(average_precision_score(y_true, y_prob, pos_label=1)),
         }
 
     def _build_model(self, preferred_model: str, seed: int) -> Any:

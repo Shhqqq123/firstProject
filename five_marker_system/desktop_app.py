@@ -16,7 +16,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 APP_PATH = BASE_DIR / "app.py"
 ICON_PATH = BASE_DIR / "assets" / "app_icon.ico"
-APP_USER_MODEL_ID = "Shq.BreastRiskDesktop.BreastCancerRisk.V1"
+APP_USER_MODEL_ID = "Shq.BreastHealthFiveMarkerDesktop.Screening.V1"
 
 
 def _set_windows_app_id() -> None:

@@ -1,18 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
 
 datas = [('app.py', '.'), ('medical_system', 'medical_system'), ('data', 'data'), ('assets', 'assets')]
 binaries = []
 hiddenimports = [
     'streamlit.web.cli',
     'streamlit.runtime.scriptrunner.magic_funcs',
+    'sklearn.calibration',
+    'sklearn.ensemble._forest',
+    'sklearn.ensemble._weight_boosting',
+    'sklearn.ensemble._bagging',
+    'sklearn.tree._classes',
+    'sklearn.tree._tree',
+    'sklearn.tree._criterion',
+    'sklearn.tree._splitter',
+    'sklearn.tree._utils',
+    'sklearn.metrics._classification',
+    'sklearn.metrics._ranking',
+    'sklearn.model_selection._split',
+    'sklearn.impute._base',
+    'sklearn.pipeline',
+    'sklearn.preprocessing._data',
+    'sklearn.utils._cython_blas',
+    'sklearn.utils._typedefs',
+    'sklearn.utils._weight_vector',
 ]
-hiddenimports += collect_submodules('sklearn.ensemble')
-hiddenimports += collect_submodules('sklearn.tree')
-hiddenimports += collect_submodules('sklearn.metrics')
-hiddenimports += collect_submodules('sklearn.model_selection')
-hiddenimports += collect_submodules('sklearn.utils')
-hiddenimports += collect_submodules('reportlab')
 datas += collect_data_files('streamlit')
 datas += copy_metadata('streamlit')
 tmp_ret = collect_all('reportlab')
@@ -35,7 +47,10 @@ a = Analysis(
         'IPython', 'jupyter', 'jupyterlab', 'notebook', 'nbconvert', 'nbformat',
         'sphinx', 'pytest', 'skimage', 'astropy', 'plotly', 'bokeh',
         'distributed', 'dask', 'xarray', 'statsmodels', 'numba', 'h5py',
-        'tables', 'botocore', 'boto3', 'tensorflow', 'torch',
+        'tables', 'botocore', 'boto3', 'tensorflow', 'torch', 'catboost',
+        'sklearn.tests', 'sklearn.ensemble.tests', 'sklearn.tree.tests',
+        'sklearn.metrics.tests', 'sklearn.model_selection.tests',
+        'sklearn.utils.tests',
     ],
     noarchive=False,
     optimize=0,
@@ -47,7 +62,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='BreastRiskDesktop',
+    name='BreastHealthFiveMarkerDesktop',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -67,5 +82,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='BreastRiskDesktop',
+    name='BreastHealthFiveMarkerDesktop',
 )

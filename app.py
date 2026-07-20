@@ -1,9 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import html
+import shutil
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -43,6 +46,23 @@ from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn
 
 
 APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+
+
+def _configure_matplotlib_fonts() -> None:
+    """Ensure Chinese labels in ROC/PR figures render correctly."""
+    matplotlib.rcParams["font.sans-serif"] = [
+        "Microsoft YaHei",
+        "SimHei",
+        "DengXian",
+        "Arial Unicode MS",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "DejaVu Sans",
+    ]
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+_configure_matplotlib_fonts()
 
 
 def _load_page_icon() -> Image.Image | str:
@@ -334,7 +354,76 @@ def _format_metric(metrics: dict[str, Any], key: str) -> str:
     return f"{float(value):.4f}"
 
 
-def _render_training_result(metrics: dict[str, Any], class_distribution: dict[str, int] | None = None) -> None:
+def _render_binary_task_curves(task_title: str, curve_data: dict[str, Any], color: str) -> None:
+    if not curve_data:
+        return
+
+    fpr = np.asarray(curve_data.get("fpr", []), dtype=float)
+    tpr = np.asarray(curve_data.get("tpr", []), dtype=float)
+    precision_vals = np.asarray(curve_data.get("precision", []), dtype=float)
+    recall_vals = np.asarray(curve_data.get("recall", []), dtype=float)
+    if fpr.size == 0 or tpr.size == 0 or precision_vals.size == 0 or recall_vals.size == 0:
+        return
+
+    auc_roc = float(curve_data.get("auc_roc", 0.0))
+    auc_pr = float(curve_data.get("auc_pr", 0.0))
+    positive_rate = float(curve_data.get("positive_rate", 0.0))
+
+    st.markdown(f"<div class='sub-section-title'>{html.escape(task_title)}</div>", unsafe_allow_html=True)
+    left, right = st.columns(2)
+
+    with left:
+        fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=120)
+        ax.plot(fpr, tpr, color=color, linewidth=2.2, label=f"AUROC={auc_roc:.3f}")
+        ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", linewidth=1.5, label="随机基线=0.500")
+        ax.set_title(f"{task_title} AUROC曲线", fontsize=12, fontweight="bold")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, linestyle=":", alpha=0.65)
+        ax.legend(loc="lower right", frameon=True)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+
+    with right:
+        fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=120)
+        ax.plot(recall_vals, precision_vals, color=color, linewidth=2.2, label=f"AUPRC={auc_pr:.3f}")
+        ax.axhline(
+            y=positive_rate,
+            color="#94a3b8",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"随机基线={positive_rate:.3f}",
+        )
+        ax.set_title(f"{task_title} AUPRC曲线", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, linestyle=":", alpha=0.65)
+        ax.legend(loc="best", frameon=True)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+
+
+def _render_training_curves(curve_data: dict[str, Any] | None) -> None:
+    if not isinstance(curve_data, dict):
+        return
+    if not curve_data.get("malignant") and not curve_data.get("benign") and not curve_data.get("benign_malignant"):
+        return
+
+    st.markdown("<div class='sub-section-title'>各预测子任务 AUROC / AUPRC 曲线</div>", unsafe_allow_html=True)
+    _render_binary_task_curves("恶性病变预测子任务", curve_data.get("malignant", {}), "#c0392b")
+    _render_binary_task_curves("良性病变预测子任务", curve_data.get("benign", {}), "#1a5f7a")
+    _render_binary_task_curves("良性vs恶性直接判别子任务", curve_data.get("benign_malignant", {}), "#7c3aed")
+
+
+def _render_training_result(
+    metrics: dict[str, Any],
+    class_distribution: dict[str, int] | None = None,
+    curve_data: dict[str, Any] | None = None,
+) -> None:
     st.markdown("<div class='section-title'>交叉验证多维评估指标</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("平均AUC", _format_metric(metrics, "auc"))
@@ -355,6 +444,7 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                         </h4>
                         <table>
                             <tr><td>AUC 检测效能</td><td><span class="badge badge-red">{_format_metric(metrics, "malignant_auc")}</span></td></tr>
+                            <tr><td>AUPRC 曲线面积</td><td>{_format_metric(metrics, "malignant_auc_pr")}</td></tr>
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "malignant_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "malignant_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "malignant_accuracy")}</td></tr>
@@ -373,6 +463,7 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                         </h4>
                         <table>
                             <tr><td>AUC 检测效能</td><td><span class="badge badge-blue">{_format_metric(metrics, "benign_auc")}</span></td></tr>
+                            <tr><td>AUPRC 曲线面积</td><td>{_format_metric(metrics, "benign_auc_pr")}</td></tr>
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "benign_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "benign_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_accuracy")}</td></tr>
@@ -381,6 +472,45 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                     """,
                     unsafe_allow_html=True,
                 )
+
+        if "benign_malignant_auc" in metrics:
+            st.markdown(
+                f"""
+                <div class="med-card task-card">
+                    <h4 style="color:#6d28d9; margin-top:0; border-bottom:1px solid #ede9fe; padding-bottom:8px;">
+                        良性vs恶性直接判别子任务
+                    </h4>
+                    <table>
+                        <tr><td>AUC 检测效能</td><td><span class="badge badge-blue">{_format_metric(metrics, "benign_malignant_auc")}</span></td></tr>
+                        <tr><td>AUPRC 曲线面积</td><td>{_format_metric(metrics, "benign_malignant_auc_pr")}</td></tr>
+                        <tr><td>Precision 精确率（良性为阳性）</td><td>{_format_metric(metrics, "benign_malignant_precision")}</td></tr>
+                        <tr><td>Recall 召回率（良性为阳性）</td><td>{_format_metric(metrics, "benign_malignant_recall")}</td></tr>
+                        <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_malignant_accuracy")}</td></tr>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if "multiclass_accuracy" in metrics:
+            st.markdown(
+                f"""
+                <div class="med-card task-card">
+                    <h4 style="color:#0f766e; margin-top:0; border-bottom:1px solid #ccfbf1; padding-bottom:8px;">
+                        平衡采样三分类集成模型
+                    </h4>
+                    <table>
+                        <tr><td>Accuracy 准确率</td><td><span class="badge badge-blue">{_format_metric(metrics, "multiclass_accuracy")}</span></td></tr>
+                        <tr><td>Balanced Accuracy 平衡准确率</td><td>{_format_metric(metrics, "multiclass_balanced_accuracy")}</td></tr>
+                        <tr><td>Macro Precision 宏平均精确率</td><td>{_format_metric(metrics, "multiclass_precision_macro")}</td></tr>
+                        <tr><td>Macro Recall 宏平均召回率</td><td>{_format_metric(metrics, "multiclass_recall_macro")}</td></tr>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    _render_training_curves(curve_data)
 
     if class_distribution:
         st.markdown("<div class='sub-section-title'>样本类别分布</div>", unsafe_allow_html=True)
@@ -529,6 +659,51 @@ def _read_uploaded_table(uploaded_file: Any) -> pd.DataFrame:
     return pd.read_csv(uploaded_file)
 
 
+def _default_report_export_dir() -> Path:
+    downloads = Path.home() / "Downloads"
+    if downloads.exists():
+        return downloads
+    desktop = Path.home() / "Desktop"
+    if desktop.exists():
+        return desktop
+    return Path.home()
+
+
+def _choose_report_export_dir(initial_dir: Path) -> Path | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        st.error(f"无法打开文件夹选择窗口：{exc}")
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        selected = filedialog.askdirectory(
+            title="选择报告保存目录",
+            initialdir=str(initial_dir if initial_dir.exists() else _default_report_export_dir()),
+            mustexist=True,
+            parent=root,
+        )
+    finally:
+        root.destroy()
+
+    return Path(selected) if selected else None
+
+
+def _copy_report_to_dir(source_path: Path, target_dir: Path) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / source_path.name
+    if source_path.resolve() != target_path.resolve():
+        shutil.copy2(source_path, target_path)
+    return target_path
+
+
 def audit(
     action: str,
     module: str,
@@ -557,6 +732,280 @@ def load_model() -> BreastRiskModel | None:
 def fetch_subject_options() -> dict[str, int]:
     subjects = list_subjects()
     return {f"{item['id']} - {item['name']}": item["id"] for item in subjects}
+
+
+def _normalize_batch_column_name(column: Any) -> str:
+    text = str(column).strip()
+    lower = (
+        text.lower()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace(".", "")
+        .replace("/", "")
+    )
+    aliases = {
+        "序号": "序号",
+        "编号": "序号",
+        "id": "序号",
+        "姓名": "姓名",
+        "名字": "姓名",
+        "name": "姓名",
+        "akr1b10": "akr1b10",
+        "ak1rb10": "akr1b10",
+        "ca199": "ca19_9",
+        "nse": "nse",
+        "ca125": "ca125",
+        "ca153": "ca153",
+        "cea": "cea",
+    }
+    return aliases.get(lower, text)
+
+
+def _feature_display_name(column: str) -> str:
+    names = {
+        "akr1b10": "AKR1B10",
+        "ca19_9": "CA19-9",
+        "nse": "NSE",
+        "ca125": "CA125",
+        "ca153": "CA15-3",
+        "cea": "CEA",
+    }
+    return names.get(column, column.upper())
+
+
+def _prepare_batch_prediction_frame(uploaded_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df = uploaded_df.copy()
+    df.columns = [_normalize_batch_column_name(col) for col in df.columns]
+
+    missing = [col for col in FEATURE_COLUMNS if col not in df.columns]
+    if missing:
+        display_missing = [_feature_display_name(col) for col in missing]
+        raise ValueError(f"缺少必要指标列：{', '.join(display_missing)}")
+
+    feature_df = df[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    invalid_rows = feature_df.isna().any(axis=1)
+    if invalid_rows.any():
+        bad_index = [str(i + 2) for i in np.where(invalid_rows.to_numpy())[0][:10]]
+        raise ValueError(f"存在空值或非数字指标，请检查 Excel 第 {', '.join(bad_index)} 行。")
+
+    return df, feature_df
+
+
+def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame, mode: str = "三分类") -> pd.DataFrame:
+    original_df, feature_df = _prepare_batch_prediction_frame(uploaded_df)
+    rows: list[dict[str, Any]] = []
+    for idx in range(len(feature_df)):
+        pred = model.predict_disease_only(feature_df.iloc[[idx]]) if mode == "良性/恶性二分类" else model.predict(feature_df.iloc[[idx]])
+        probabilities = pred["probabilities"]
+        predicted_class = pred["predicted_class"]
+        risk_level = get_risk_level(
+            predicted_class=predicted_class,
+            malignant_prob=probabilities.get("malignant", 0.0),
+            confidence=float(pred["confidence"]),
+        )
+        rows.append(
+            {
+                "预测类别": to_cn_class(predicted_class),
+                "风险等级": risk_level,
+                "可信度": round(float(pred["confidence"]), 4),
+                "正常概率": round(float(probabilities.get("normal", 0.0)), 4),
+                "良性概率": round(float(probabilities.get("benign", 0.0)), 4),
+                "恶性概率": round(float(probabilities.get("malignant", 0.0)), 4),
+            }
+        )
+    return pd.concat([original_df.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
+
+
+def _normalize_cn_label(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().lower()
+    mapping = {
+        "normal": "正常",
+        "healthy": "正常",
+        "0": "正常",
+        "正常": "正常",
+        "健康": "正常",
+        "benign": "良性",
+        "1": "良性",
+        "良性": "良性",
+        "malignant": "恶性",
+        "cancer": "恶性",
+        "2": "恶性",
+        "恶性": "恶性",
+    }
+    return mapping.get(text)
+
+
+def _find_truth_label_column(df: pd.DataFrame) -> str | None:
+    skip_columns = {"预测类别", "风险等级", "可信度", "正常概率", "良性概率", "恶性概率"}
+    preferred = ["检查结果", "真实标签", "label", "Label", "结果"]
+    candidates = [c for c in preferred if c in df.columns]
+    candidates.extend([c for c in df.columns if c not in preferred])
+    for col in candidates:
+        if col in skip_columns:
+            continue
+        values = df[col]
+        if isinstance(values, pd.DataFrame):
+            values = values.iloc[:, 0]
+        normalized = values.map(_normalize_cn_label)
+        valid_count = int(normalized.notna().sum())
+        if valid_count >= max(5, int(len(df) * 0.5)):
+            unique_values = set(normalized.dropna().unique())
+            if unique_values and unique_values.issubset({"正常", "良性", "恶性"}):
+                return str(col)
+    return None
+
+
+def _render_batch_validation_metrics(result_df: pd.DataFrame) -> None:
+    truth_col = _find_truth_label_column(result_df)
+    if truth_col is None or "预测类别" not in result_df.columns:
+        return
+
+    y_true = result_df[truth_col].map(_normalize_cn_label)
+    y_pred = result_df["预测类别"].map(_normalize_cn_label)
+    valid = y_true.notna() & y_pred.notna()
+    if not valid.any():
+        return
+
+    y_true = y_true[valid]
+    y_pred = y_pred[valid]
+    accuracy = float((y_true == y_pred).mean())
+    st.markdown("<div class='sub-section-title'>批量验证统计</div>", unsafe_allow_html=True)
+    st.metric("验证集准确率", f"{accuracy:.4f}", help=f"真实标签列：{truth_col}，有效样本数：{len(y_true)}")
+    matrix = pd.crosstab(y_true, y_pred, rownames=["真实类别"], colnames=["预测类别"], dropna=False)
+    st.dataframe(matrix, use_container_width=True)
+
+    rows: list[dict[str, Any]] = []
+    for label in ["正常", "良性", "恶性"]:
+        actual = int((y_true == label).sum())
+        predicted = int((y_pred == label).sum())
+        if actual == 0 and predicted == 0:
+            continue
+        tp = int(((y_true == label) & (y_pred == label)).sum())
+        rows.append(
+            {
+                "类别": label,
+                "真实样本数": actual,
+                "预测样本数": predicted,
+                "Precision": round(tp / predicted, 4) if predicted else None,
+                "Recall": round(tp / actual, 4) if actual else None,
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+
+def _to_excel_bytes(df: pd.DataFrame, sheet_name: str = "批量预测结果") -> bytes:
+    from io import BytesIO
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+
+def _save_batch_prediction_result(df: pd.DataFrame) -> Path:
+    from datetime import datetime
+
+    output_dir = Path(REPORT_DIR) / "batch_predictions"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = output_dir / f"六项肿瘤标志物_批量预测结果_{timestamp}.xlsx"
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="批量预测结果")
+    return output_path
+
+
+def _render_batch_prediction_panel(model: BreastRiskModel) -> None:
+    st.markdown("<div class='sub-section-title'>批量样本预测</div>", unsafe_allow_html=True)
+    st.caption(
+        "上传 Excel 后，系统会逐行读取六项指标并输出正常、良性、恶性概率。"
+        "支持列名：序号、姓名、AKR1B10、CA19-9、NSE、CA125、CA15-3、CEA；"
+        "CA242 等其他列会保留但不参与预测。"
+    )
+
+    prediction_mode = st.radio(
+        "批量预测模式",
+        ["常规三分类", "良性/恶性二分类"],
+        horizontal=True,
+        help="验证集如果只有良性和恶性样本，请选择良性/恶性二分类；常规临床筛查请选择常规三分类。",
+    )
+    prediction_mode_key = "良性/恶性二分类" if prediction_mode == "良性/恶性二分类" else "三分类"
+    if prediction_mode == "良性/恶性二分类" and not getattr(model, "benign_malignant_models", []):
+        st.warning("当前模型还没有良性vs恶性直接判别专家。请先在“模型训练”页面重新训练一次模型。")
+
+    template_df = pd.DataFrame(
+        [
+            {
+                "序号": 1,
+                "姓名": "示例患者",
+                "AKR1B10": 0.0,
+                "CA19-9": 3.21,
+                "NSE": 2.70,
+                "CA125": 51.10,
+                "CA15-3": 20.38,
+                "CEA": 0.50,
+            }
+        ]
+    )
+    st.download_button(
+        "下载批量预测 Excel 模板",
+        data=_to_excel_bytes(template_df, sheet_name="批量预测模板"),
+        file_name="六项肿瘤标志物_批量预测模板.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    uploaded = st.file_uploader("上传待验证样本 Excel/CSV", type=["xlsx", "csv"], key="batch_prediction_file")
+    if uploaded is None:
+        return
+
+    try:
+        batch_df = _read_uploaded_table(uploaded)
+        if batch_df.empty:
+            st.warning("上传文件为空。")
+            return
+        st.markdown("<div class='sub-section-title'>上传数据预览</div>", unsafe_allow_html=True)
+        st.dataframe(batch_df.head(20), use_container_width=True)
+    except Exception as exc:
+        st.error(f"文件读取失败：{exc}")
+        return
+
+    if st.button("开始批量预测", type="primary", use_container_width=True):
+        try:
+            with st.spinner("正在批量预测，请稍候..."):
+                result_df = _run_batch_prediction(model, batch_df, mode=prediction_mode_key)
+                saved_path = _save_batch_prediction_result(result_df)
+            st.session_state["last_batch_prediction_result"] = result_df
+            st.session_state["last_batch_prediction_file"] = str(uploaded.name)
+            st.session_state["last_batch_prediction_mode"] = prediction_mode
+            st.session_state["last_batch_prediction_saved_path"] = str(saved_path)
+            audit("batch_inference", "ml", "batch_prediction", None, {"rows": int(len(result_df)), "mode": prediction_mode})
+        except Exception as exc:
+            st.error(f"批量预测失败：{exc}")
+            return
+
+    result_df = (
+        st.session_state.get("last_batch_prediction_result")
+        if st.session_state.get("last_batch_prediction_file") == str(uploaded.name)
+        and st.session_state.get("last_batch_prediction_mode") == prediction_mode
+        else None
+    )
+    if isinstance(result_df, pd.DataFrame):
+        st.success(f"批量预测完成：共 {len(result_df)} 条样本。")
+        saved_path = st.session_state.get("last_batch_prediction_saved_path")
+        if saved_path:
+            st.info(f"已自动保存到本地：{saved_path}")
+        _render_batch_validation_metrics(result_df)
+        st.dataframe(result_df, use_container_width=True)
+        st.download_button(
+            "下载批量预测结果 Excel",
+            data=_to_excel_bytes(result_df),
+            file_name="六项肿瘤标志物_批量预测结果.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 
 def make_synthetic_training_data() -> pd.DataFrame:
@@ -630,16 +1079,14 @@ def main() -> None:
     user = current_user()
     assert user is not None
 
-    if APP_ICON_PATH.exists():
-        st.sidebar.image(str(APP_ICON_PATH), width=74)
-        st.sidebar.markdown(
-            """
-            <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:-4px 0 14px;">
-                乳腺风险评估系统
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.sidebar.markdown(
+        """
+        <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:8px 0 18px; line-height:1.55;">
+            基于六项肿瘤标志物的乳腺癌诊断评估系统 V1.0
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     username_display = html.escape(str(user["username"]))
     role_display = html.escape(role_to_cn(str(user["role"])))
@@ -969,6 +1416,7 @@ def page_training() -> None:
                 st.session_state["last_training_result"] = {
                     "metrics": result.metrics,
                     "class_distribution": result.class_distribution,
+                    "curve_data": result.curve_data,
                 }
             except Exception as exc:
                 st.error(f"训练失败：{exc}")
@@ -981,6 +1429,7 @@ def page_training() -> None:
         _render_training_result(
             metrics=last_training.get("metrics", {}),
             class_distribution=last_training.get("class_distribution", {}),
+            curve_data=last_training.get("curve_data", {}),
         )
 
 
@@ -1003,9 +1452,12 @@ def page_inference() -> None:
         st.warning("未检测到模型，请先训练模型。")
         return
 
+    _render_batch_prediction_panel(model)
+    st.divider()
+
     subject_options = fetch_subject_options()
     if not subject_options:
-        st.warning("暂无受检者。")
+        st.warning("暂无受检者，单条评估需要先在“受检者管理”和“检验数据管理”中录入数据。")
         return
 
     selected_label = st.selectbox("选择受检者", list(subject_options.keys()), key="pred_subject")
@@ -1128,29 +1580,85 @@ def page_report() -> None:
 
     followup_df = get_followup_dataframe(subject_id)
     if st.button("生成 HTML + PDF 报告", type="primary"):
-        html_path = generate_report_html(
-            subject=subject,
-            test_row=test_row,
-            evaluation_row=evaluation,
-            followup_df=followup_df,
-            output_dir=Path(REPORT_DIR),
-        )
-        pdf_path = generate_report_pdf(
-            subject=subject,
-            test_row=test_row,
-            evaluation_row=evaluation,
-            followup_df=followup_df,
-            output_dir=Path(REPORT_DIR),
-        )
+        try:
+            html_path = generate_report_html(
+                subject=subject,
+                test_row=test_row,
+                evaluation_row=evaluation,
+                followup_df=followup_df,
+                output_dir=Path(REPORT_DIR),
+            )
+            pdf_path = generate_report_pdf(
+                subject=subject,
+                test_row=test_row,
+                evaluation_row=evaluation,
+                followup_df=followup_df,
+                output_dir=Path(REPORT_DIR),
+            )
+        except ModuleNotFoundError as exc:
+            st.error(str(exc))
+            return
         audit("generate_report", "reports", "test", test_id, {"html": html_path.name, "pdf": pdf_path.name})
-        st.success(f"报告生成完成：{html_path.name}，{pdf_path.name}")
+        st.session_state["last_report_export"] = {
+            "test_id": test_id,
+            "html_path": str(html_path),
+            "pdf_path": str(pdf_path),
+            "html_name": html_path.name,
+            "pdf_name": pdf_path.name,
+        }
 
-        html_content = html_path.read_text(encoding="utf-8")
-        pdf_content = pdf_path.read_bytes()
+    report_export = st.session_state.get("last_report_export")
+    if isinstance(report_export, dict) and report_export.get("test_id") == test_id:
+        html_path = Path(str(report_export.get("html_path", "")))
+        pdf_path = Path(str(report_export.get("pdf_path", "")))
+        if html_path.exists() and pdf_path.exists():
+            st.success(f"报告生成完成：{html_path.name}，{pdf_path.name}")
+            html_content = html_path.read_text(encoding="utf-8")
+            pdf_content = pdf_path.read_bytes()
+            st.markdown("<div class='sub-section-title'>保存到本地文件夹</div>", unsafe_allow_html=True)
+            save_dir_key = f"report_save_dir_{test_id}"
+            if save_dir_key not in st.session_state:
+                st.session_state[save_dir_key] = str(_default_report_export_dir())
 
-        st.download_button("下载 HTML 报告", data=html_content.encode("utf-8"), file_name=html_path.name, mime="text/html")
-        st.download_button("下载 PDF 报告", data=pdf_content, file_name=pdf_path.name, mime="application/pdf")
-        st.components.v1.html(html_content, height=700, scrolling=True)
+            st.write(f"当前保存目录：`{st.session_state[save_dir_key]}`")
+            col_choose, col_save = st.columns([1, 2])
+            with col_choose:
+                if st.button("选择保存目录", key=f"choose_report_dir_{test_id}"):
+                    selected_dir = _choose_report_export_dir(Path(str(st.session_state[save_dir_key])))
+                    if selected_dir is not None:
+                        st.session_state[save_dir_key] = str(selected_dir)
+                        _rerun()
+
+            with col_save:
+                save_clicked = st.button("保存报告到此文件夹", key=f"save_report_files_{test_id}")
+            if save_clicked:
+                try:
+                    target_dir = Path(str(st.session_state[save_dir_key])).expanduser()
+                    saved_html = _copy_report_to_dir(html_path, target_dir)
+                    saved_pdf = _copy_report_to_dir(pdf_path, target_dir)
+                    st.success(f"已保存到：{target_dir}\n\nHTML：{saved_html.name}\n\nPDF：{saved_pdf.name}")
+                except Exception as exc:
+                    st.error(f"保存失败：{exc}")
+
+            st.markdown("<div class='sub-section-title'>浏览器下载备用</div>", unsafe_allow_html=True)
+            st.download_button(
+                "下载 HTML 报告",
+                data=html_content.encode("utf-8"),
+                file_name=html_path.name,
+                mime="text/html",
+                key=f"download_html_report_{test_id}",
+            )
+            st.download_button(
+                "下载 PDF 报告",
+                data=pdf_content,
+                file_name=pdf_path.name,
+                mime="application/pdf",
+                key=f"download_pdf_report_{test_id}",
+            )
+            st.components.v1.html(html_content, height=700, scrolling=True)
+        else:
+            st.warning("报告文件不存在或已被移动，请重新生成报告。")
+            st.session_state.pop("last_report_export", None)
 
 
 def page_audit_logs() -> None:
@@ -1237,3 +1745,4 @@ def page_user_admin() -> None:
 
 if __name__ == "__main__":
     main()
+

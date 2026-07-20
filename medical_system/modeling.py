@@ -9,10 +9,19 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_recall_curve, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import train_test_split
 
-from .config import FEATURE_COLUMNS, FEATURE_PREPROCESSING_VERSION, LABEL_COLUMN
+from .config import CLASS_ORDER, FEATURE_COLUMNS, FEATURE_PREPROCESSING_VERSION, LABEL_COLUMN
 from .preprocessing import normalize_by_reference_ranges
 
 try:
@@ -25,6 +34,7 @@ except Exception:  # pragma: no cover - optional dependency
 class TrainResult:
     metrics: dict[str, float]
     class_distribution: dict[str, int]
+    curve_data: dict[str, Any] | None = None
 
 
 class BreastRiskModel:
@@ -40,10 +50,17 @@ class BreastRiskModel:
         self.n_models = n_models
         self.malignant_models: list[Any] = []
         self.benign_models: list[Any] = []
+        self.benign_malignant_models: list[Any] = []
+        self.multiclass_models: list[Any] = []
         self.malignant_model_type: str = "catboost"
         self.benign_model_type: str = "random_forest"
+        self.benign_malignant_model_type: str = "random_forest"
+        self.multiclass_model_type: str = "balanced_multiclass_ensemble"
         self.malignant_threshold: float = 0.5
         self.benign_threshold: float = 0.5
+        self.benign_malignant_threshold: float = 0.5
+        self.malignant_guard_threshold: float = 0.34
+        self.malignant_guard_margin: float = 0.08
         self.global_feature_importance: dict[str, float] = {}
         self.train_metrics: dict[str, float] = {}
         self.metric_target: float = 0.80
@@ -85,13 +102,26 @@ class BreastRiskModel:
             task_name="正常vs良性",
             preferred_model="random_forest",
         )
+        benign_malignant_result = self._train_binary_task(
+            data=data,
+            positive_label="benign",
+            negative_label="malignant",
+            task_name="良性vs恶性",
+            preferred_model="random_forest",
+        )
+        multiclass_result = self._train_multiclass_task(data)
 
         self.malignant_models = malignant_result["models"]
         self.benign_models = benign_result["models"]
+        self.benign_malignant_models = benign_malignant_result["models"]
+        self.multiclass_models = multiclass_result["models"]
         self.malignant_model_type = malignant_result["model_type"]
         self.benign_model_type = benign_result["model_type"]
+        self.benign_malignant_model_type = benign_malignant_result["model_type"]
+        self.multiclass_model_type = multiclass_result["model_type"]
         self.malignant_threshold = float(malignant_result["threshold"])
         self.benign_threshold = float(benign_result["threshold"])
+        self.benign_malignant_threshold = float(benign_malignant_result["threshold"])
         self.global_feature_importance = self._merge_feature_importance(
             malignant_result["feature_importance"],
             benign_result["feature_importance"],
@@ -105,16 +135,32 @@ class BreastRiskModel:
             "recall": float(np.mean([malignant_result["metrics"]["recall"], benign_result["metrics"]["recall"]])),
             "accuracy": float(np.mean([malignant_result["metrics"]["accuracy"], benign_result["metrics"]["accuracy"]])),
             "malignant_auc": float(malignant_result["metrics"]["auc_roc"]),
+            "malignant_auc_pr": float(malignant_result["metrics"]["auc_pr"]),
             "malignant_precision": float(malignant_result["metrics"]["precision"]),
             "malignant_recall": float(malignant_result["metrics"]["recall"]),
             "malignant_accuracy": float(malignant_result["metrics"]["accuracy"]),
             "benign_auc": float(benign_result["metrics"]["auc_roc"]),
+            "benign_auc_pr": float(benign_result["metrics"]["auc_pr"]),
             "benign_precision": float(benign_result["metrics"]["precision"]),
             "benign_recall": float(benign_result["metrics"]["recall"]),
             "benign_accuracy": float(benign_result["metrics"]["accuracy"]),
+            "benign_malignant_auc": float(benign_malignant_result["metrics"]["auc_roc"]),
+            "benign_malignant_auc_pr": float(benign_malignant_result["metrics"]["auc_pr"]),
+            "benign_malignant_precision": float(benign_malignant_result["metrics"]["precision"]),
+            "benign_malignant_recall": float(benign_malignant_result["metrics"]["recall"]),
+            "benign_malignant_accuracy": float(benign_malignant_result["metrics"]["accuracy"]),
+            "multiclass_accuracy": float(multiclass_result["metrics"]["accuracy"]),
+            "multiclass_balanced_accuracy": float(multiclass_result["metrics"]["balanced_accuracy"]),
+            "multiclass_precision_macro": float(multiclass_result["metrics"]["precision_macro"]),
+            "multiclass_recall_macro": float(multiclass_result["metrics"]["recall_macro"]),
         }
         self.train_metrics = metrics
-        return TrainResult(metrics=metrics, class_distribution=class_distribution)
+        curve_data = {
+            "malignant": malignant_result.get("curve_data", {}),
+            "benign": benign_result.get("curve_data", {}),
+            "benign_malignant": benign_malignant_result.get("curve_data", {}),
+        }
+        return TrainResult(metrics=metrics, class_distribution=class_distribution, curve_data=curve_data)
 
     def predict(self, sample_df: pd.DataFrame) -> dict[str, Any]:
         if not self.malignant_models or not self.benign_models:
@@ -123,38 +169,40 @@ class BreastRiskModel:
         data = _prepare_feature_frame(sample_df)
         p_malignant_raw = self._predict_binary_probability(self.malignant_models, data)
         p_benign_raw = self._predict_binary_probability(self.benign_models, data)
+        p_benign_disease = self._predict_benign_vs_malignant_probability(data)
+        multiclass_probs = self._predict_multiclass_probabilities(data)
 
-        # Two-stage hard gating keeps the benign expert from being suppressed
-        # by the malignant expert's probability.
-        if p_malignant_raw >= self.malignant_threshold:
-            predicted_class = "malignant"
-        elif p_benign_raw >= self.benign_threshold:
-            predicted_class = "benign"
-        else:
-            predicted_class = "normal"
-
+        abnormal_score = max(float(p_malignant_raw), float(p_benign_raw))
         m = float(np.clip(p_malignant_raw, 0.0, 1.0))
         b = float(np.clip(p_benign_raw, 0.0, 1.0))
-        if predicted_class == "malignant":
+        if p_benign_disease is not None:
+            disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
+            benign_share = float(np.clip(p_benign_disease, 0.0, 1.0))
             probs = {
-                "malignant": m,
-                "benign": (1.0 - m) * b,
-                "normal": (1.0 - m) * (1.0 - b),
-            }
-        elif predicted_class == "benign":
-            m_soft = 0.5 * m  # malignant gate failed, so downweight malignant branch
-            probs = {
-                "malignant": m_soft,
-                "benign": (1.0 - m_soft) * b,
-                "normal": (1.0 - m_soft) * (1.0 - b),
+                "normal": 1.0 - disease_mass,
+                "benign": disease_mass * benign_share,
+                "malignant": disease_mass * (1.0 - benign_share),
             }
         else:
-            m_soft = 0.5 * m
-            b_soft = 0.5 * b
+            disease_mass = float(np.clip(abnormal_score, 0.0, 1.0))
+            disease_total = m + b
+            if disease_total > 0:
+                malignant_share = m / disease_total
+                benign_share = b / disease_total
+            else:
+                malignant_share = benign_share = 0.5
             probs = {
-                "malignant": m_soft,
-                "benign": b_soft,
-                "normal": max(0.0, 1.0 - m_soft - b_soft),
+                "normal": 1.0 - disease_mass,
+                "benign": disease_mass * benign_share,
+                "malignant": disease_mass * malignant_share,
+            }
+
+        if multiclass_probs:
+            multi_weight = 0.60
+            expert_weight = 1.0 - multi_weight
+            probs = {
+                key: float(multi_weight * multiclass_probs.get(key, 0.0) + expert_weight * probs.get(key, 0.0))
+                for key in CLASS_ORDER
             }
 
         total = float(sum(probs.values()))
@@ -162,6 +210,14 @@ class BreastRiskModel:
             probs = {"normal": 1.0, "benign": 0.0, "malignant": 0.0}
         else:
             probs = {k: float(v / total) for k, v in probs.items()}
+
+        predicted_class = max(probs, key=probs.get)
+        if (
+            probs.get("malignant", 0.0) >= self.malignant_guard_threshold
+            and probs.get("malignant", 0.0) + self.malignant_guard_margin >= probs.get("benign", 0.0)
+            and probs.get("malignant", 0.0) >= probs.get("normal", 0.0)
+        ):
+            predicted_class = "malignant"
 
         # Ensure the displayed probability ordering is consistent with gated decision.
         max_other = max(v for k, v in probs.items() if k != predicted_class)
@@ -180,12 +236,36 @@ class BreastRiskModel:
             "feature_contribution": contribution,
         }
 
+    def predict_disease_only(self, sample_df: pd.DataFrame) -> dict[str, Any]:
+        """Predict only between benign and malignant for external diseased validation sets."""
+        if not self.malignant_models or not self.benign_models:
+            raise ValueError("模型尚未训练或加载。")
+
+        data = _prepare_feature_frame(sample_df)
+        p_benign = self._predict_benign_vs_malignant_probability(data)
+        if p_benign is None:
+            p_malignant_raw = self._predict_binary_probability(self.malignant_models, data)
+            p_benign_raw = self._predict_binary_probability(self.benign_models, data)
+            total = p_benign_raw + p_malignant_raw
+            p_benign = 0.5 if total <= 0 else float(p_benign_raw / total)
+
+        p_benign = float(np.clip(p_benign, 0.0, 1.0))
+        predicted_class = "benign" if p_benign >= self.benign_malignant_threshold else "malignant"
+        probabilities = {"benign": p_benign, "malignant": 1.0 - p_benign}
+        confidence = float(probabilities[predicted_class])
+        return {
+            "predicted_class": predicted_class,
+            "probabilities": probabilities,
+            "confidence": confidence,
+            "feature_contribution": self._sample_contribution(data.iloc[0]),
+        }
+
     def save(self, path: Path) -> None:
         if not self.malignant_models or not self.benign_models:
             raise ValueError("模型尚未训练，无法保存。")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 4,
+            "version": 5,
             "feature_preprocessing": FEATURE_PREPROCESSING_VERSION,
             "random_state": self.random_state,
             "n_models": self.n_models,
@@ -195,10 +275,17 @@ class BreastRiskModel:
             "malignant_calib_cv": self.malignant_calib_cv,
             "malignant_models": self.malignant_models,
             "benign_models": self.benign_models,
+            "benign_malignant_models": self.benign_malignant_models,
+            "multiclass_models": self.multiclass_models,
             "malignant_model_type": self.malignant_model_type,
             "benign_model_type": self.benign_model_type,
+            "benign_malignant_model_type": self.benign_malignant_model_type,
+            "multiclass_model_type": self.multiclass_model_type,
             "malignant_threshold": self.malignant_threshold,
             "benign_threshold": self.benign_threshold,
+            "benign_malignant_threshold": self.benign_malignant_threshold,
+            "malignant_guard_threshold": self.malignant_guard_threshold,
+            "malignant_guard_margin": self.malignant_guard_margin,
             "global_feature_importance": self.global_feature_importance,
             "train_metrics": self.train_metrics,
         }
@@ -222,10 +309,17 @@ class BreastRiskModel:
         model.malignant_calib_cv = int(payload.get("malignant_calib_cv", 3))
         model.malignant_models = payload.get("malignant_models", [])
         model.benign_models = payload.get("benign_models", [])
+        model.benign_malignant_models = payload.get("benign_malignant_models", [])
+        model.multiclass_models = payload.get("multiclass_models", [])
         model.malignant_model_type = str(payload.get("malignant_model_type", "random_forest"))
         model.benign_model_type = str(payload.get("benign_model_type", "random_forest"))
+        model.benign_malignant_model_type = str(payload.get("benign_malignant_model_type", "random_forest"))
+        model.multiclass_model_type = str(payload.get("multiclass_model_type", "balanced_multiclass_ensemble"))
         model.malignant_threshold = float(payload.get("malignant_threshold", 0.5))
         model.benign_threshold = float(payload.get("benign_threshold", 0.5))
+        model.benign_malignant_threshold = float(payload.get("benign_malignant_threshold", 0.5))
+        model.malignant_guard_threshold = float(payload.get("malignant_guard_threshold", 0.34))
+        model.malignant_guard_margin = float(payload.get("malignant_guard_margin", 0.08))
         model.global_feature_importance = payload.get("global_feature_importance", {})
         model.train_metrics = payload.get("train_metrics", {})
         return model
@@ -306,6 +400,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -317,6 +412,7 @@ class BreastRiskModel:
         return {
             "models": models,
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": feature_importance,
             "model_type": model_type,
             "threshold": float(threshold),
@@ -364,6 +460,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -372,6 +469,7 @@ class BreastRiskModel:
         return {
             "models": [blend_model],
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": self._average_feature_importance([blend_model]),
             "model_type": "et_rf_isotonic_blend",
             "threshold": float(threshold),
@@ -457,6 +555,7 @@ class BreastRiskModel:
 
         metrics = {
             "auc_roc": float(roc_auc_score(y_val, ensemble_prob)),
+            "auc_pr": float(average_precision_score(y_val, ensemble_prob)),
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
@@ -465,6 +564,7 @@ class BreastRiskModel:
         return {
             "models": models,
             "metrics": metrics,
+            "curve_data": self._build_curve_data(y_val, ensemble_prob),
             "feature_importance": feature_importance,
             "model_type": "random_forest_ensemble",
             "threshold": float(threshold),
@@ -590,6 +690,20 @@ class BreastRiskModel:
             "avg_pr_acc": float((precision + recall + accuracy) / 3.0),
         }
 
+    def _build_curve_data(self, y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, Any]:
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_prob, pos_label=1)
+        positive_rate = float(np.mean(y_true == 1))
+        return {
+            "fpr": [float(v) for v in fpr],
+            "tpr": [float(v) for v in tpr],
+            "precision": [float(v) for v in precision_vals],
+            "recall": [float(v) for v in recall_vals],
+            "positive_rate": positive_rate,
+            "auc_roc": float(roc_auc_score(y_true, y_prob)),
+            "auc_pr": float(average_precision_score(y_true, y_prob, pos_label=1)),
+        }
+
     def _build_model(self, preferred_model: str, seed: int) -> Any:
         if preferred_model == "catboost":
             if CatBoostClassifier is None:
@@ -683,6 +797,127 @@ class BreastRiskModel:
     def _predict_binary_probability(self, models: list[Any], X: pd.DataFrame) -> float:
         probs = [self._predict_model_proba(model, X)[0] for model in models]
         return float(np.mean(probs))
+
+    def _predict_benign_vs_malignant_probability(self, X: pd.DataFrame) -> float | None:
+        if not self.benign_malignant_models:
+            return None
+        return self._predict_binary_probability(self.benign_malignant_models, X)
+
+    def _predict_multiclass_probabilities(self, X: pd.DataFrame) -> dict[str, float] | None:
+        if not self.multiclass_models:
+            return None
+
+        vectors: list[np.ndarray] = []
+        for model in self.multiclass_models:
+            proba = np.asarray(model.predict_proba(X))[0]
+            aligned = np.zeros(len(CLASS_ORDER), dtype=float)
+            for idx, class_name in enumerate(getattr(model, "classes_", [])):
+                if class_name in CLASS_ORDER:
+                    aligned[CLASS_ORDER.index(str(class_name))] = float(proba[idx])
+            total = float(aligned.sum())
+            if total > 0:
+                vectors.append(aligned / total)
+
+        if not vectors:
+            return None
+
+        avg = np.mean(vectors, axis=0)
+        total = float(avg.sum())
+        if total <= 0:
+            return None
+        avg = avg / total
+        return {class_name: float(avg[idx]) for idx, class_name in enumerate(CLASS_ORDER)}
+
+    def _train_multiclass_task(self, data: pd.DataFrame) -> dict[str, Any]:
+        subset = data[data[LABEL_COLUMN].isin(CLASS_ORDER)].copy().reset_index(drop=True)
+        if subset[LABEL_COLUMN].nunique() < 3:
+            raise ValueError("三分类训练至少需要正常、良性、恶性三类样本。")
+
+        train_df, val_df = train_test_split(
+            subset,
+            test_size=max(0.2, 3 / len(subset)),
+            random_state=self.random_state,
+            stratify=subset[LABEL_COLUMN],
+        )
+
+        X_val = _prepare_feature_frame(val_df)
+        y_val = val_df[LABEL_COLUMN].astype(str).to_numpy()
+
+        models: list[Any] = []
+        prob_vectors: list[np.ndarray] = []
+        for i in range(self.n_models):
+            sampled_train = self._balanced_multiclass_training_frame(train_df, seed=self.random_state + i)
+            X_train = _prepare_feature_frame(sampled_train)
+            y_train = sampled_train[LABEL_COLUMN].astype(str).to_numpy()
+
+            if i % 2 == 0:
+                clf = RandomForestClassifier(
+                    n_estimators=160,
+                    max_depth=6,
+                    min_samples_split=8,
+                    min_samples_leaf=4,
+                    class_weight="balanced_subsample",
+                    random_state=3000 + i,
+                    n_jobs=-1,
+                )
+            else:
+                clf = ExtraTreesClassifier(
+                    n_estimators=180,
+                    max_depth=6,
+                    min_samples_split=8,
+                    min_samples_leaf=4,
+                    class_weight="balanced",
+                    random_state=3000 + i,
+                    n_jobs=-1,
+                )
+
+            clf.fit(X_train, y_train)
+            models.append(clf)
+            prob_vectors.append(self._predict_multiclass_model_proba(clf, X_val))
+
+        ensemble_prob = np.mean(prob_vectors, axis=0)
+        pred_idx = np.argmax(ensemble_prob, axis=1)
+        y_pred = np.asarray([CLASS_ORDER[idx] for idx in pred_idx])
+
+        metrics = {
+            "accuracy": float(accuracy_score(y_val, y_pred)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_val, y_pred)),
+            "precision_macro": float(precision_score(y_val, y_pred, average="macro", zero_division=0)),
+            "recall_macro": float(recall_score(y_val, y_pred, average="macro", zero_division=0)),
+        }
+
+        return {
+            "models": models,
+            "metrics": metrics,
+            "feature_importance": self._average_feature_importance(models),
+            "model_type": "balanced_multiclass_ensemble",
+        }
+
+    def _balanced_multiclass_training_frame(self, train_df: pd.DataFrame, seed: int) -> pd.DataFrame:
+        counts = train_df[LABEL_COLUMN].value_counts()
+        min_count = int(counts.min())
+        max_count = int(counts.max())
+        target_count = int(min(max_count, max(80, min_count * 3)))
+
+        parts: list[pd.DataFrame] = []
+        for class_name in CLASS_ORDER:
+            class_df = train_df[train_df[LABEL_COLUMN] == class_name]
+            if class_df.empty:
+                continue
+            replace = len(class_df) < target_count
+            parts.append(class_df.sample(n=target_count, replace=replace, random_state=seed + len(parts)))
+
+        return pd.concat(parts, ignore_index=True).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    def _predict_multiclass_model_proba(self, model: Any, X: pd.DataFrame) -> np.ndarray:
+        raw = np.asarray(model.predict_proba(X))
+        aligned = np.zeros((len(X), len(CLASS_ORDER)), dtype=float)
+        for idx, class_name in enumerate(getattr(model, "classes_", [])):
+            if class_name in CLASS_ORDER:
+                aligned[:, CLASS_ORDER.index(str(class_name))] = raw[:, idx]
+        totals = aligned.sum(axis=1)
+        totals[totals <= 0] = 1.0
+        return aligned / totals[:, None]
 
     def _find_best_threshold(self, y_true: np.ndarray, y_prob: np.ndarray, target_min: float = 0.80) -> float:
         # Use probability-driven candidates instead of a coarse fixed grid,

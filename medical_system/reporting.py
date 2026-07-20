@@ -6,11 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.pdfgen import canvas
 
 from .config import CLASS_NAME_MAP, FEATURE_COLUMNS
 
@@ -128,6 +123,15 @@ def generate_report_pdf(
     followup_df: pd.DataFrame,
     output_dir: Path,
 ) -> Path:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfgen import canvas
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("缺少 PDF 导出依赖 reportlab，请先执行：pip install reportlab") from exc
+
     output_dir.mkdir(parents=True, exist_ok=True)
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     path = output_dir / f"报告_受检者{subject['id']}_检验{test_row['id']}.pdf"

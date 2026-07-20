@@ -1,18 +1,18 @@
 #define MyAppName "基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Shq"
-#define MyAppExeName "BreastRiskDesktop.exe"
+#define MyAppExeName "BreastHealthFiveMarkerDesktop.exe"
 
 [Setup]
-AppId={{3C1E1C40-746C-4E1D-8A8A-10BB04DE1111}
+AppId={{8E7A3B2B-2C46-4E53-9A68-9E8E7C3E42F5}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\BreastRiskDesktop
+DefaultDirName={autopf}\BreastHealthFiveMarkerDesktop
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=BreastRiskDesktop_Setup
+OutputBaseFilename=BreastHealthFiveMarker_Setup
 SetupIconFile=..\assets\app_icon.ico
 Compression=lzma
 SolidCompression=yes
@@ -24,7 +24,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标："; Flags: unchecked
 
 [Files]
-Source: "..\dist\BreastRiskDesktop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\BreastHealthFiveMarkerDesktop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

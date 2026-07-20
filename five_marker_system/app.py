@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import html
+import shutil
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -43,6 +46,23 @@ from medical_system.risk import followup_warning_analysis, get_risk_level, to_cn
 
 
 APP_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+
+
+def _configure_matplotlib_fonts() -> None:
+    """Ensure Chinese labels in ROC/PR figures render correctly."""
+    matplotlib.rcParams["font.sans-serif"] = [
+        "Microsoft YaHei",
+        "SimHei",
+        "DengXian",
+        "Arial Unicode MS",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "DejaVu Sans",
+    ]
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+_configure_matplotlib_fonts()
 
 
 def _load_page_icon() -> Image.Image | str:
@@ -334,7 +354,75 @@ def _format_metric(metrics: dict[str, Any], key: str) -> str:
     return f"{float(value):.4f}"
 
 
-def _render_training_result(metrics: dict[str, Any], class_distribution: dict[str, int] | None = None) -> None:
+def _render_binary_task_curves(task_title: str, curve_data: dict[str, Any], color: str) -> None:
+    if not curve_data:
+        return
+
+    fpr = np.asarray(curve_data.get("fpr", []), dtype=float)
+    tpr = np.asarray(curve_data.get("tpr", []), dtype=float)
+    precision_vals = np.asarray(curve_data.get("precision", []), dtype=float)
+    recall_vals = np.asarray(curve_data.get("recall", []), dtype=float)
+    if fpr.size == 0 or tpr.size == 0 or precision_vals.size == 0 or recall_vals.size == 0:
+        return
+
+    auc_roc = float(curve_data.get("auc_roc", 0.0))
+    auc_pr = float(curve_data.get("auc_pr", 0.0))
+    positive_rate = float(curve_data.get("positive_rate", 0.0))
+
+    st.markdown(f"<div class='sub-section-title'>{html.escape(task_title)}</div>", unsafe_allow_html=True)
+    left, right = st.columns(2)
+
+    with left:
+        fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=120)
+        ax.plot(fpr, tpr, color=color, linewidth=2.2, label=f"AUROC={auc_roc:.3f}")
+        ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", linewidth=1.5, label="随机基线=0.500")
+        ax.set_title(f"{task_title} AUROC曲线", fontsize=12, fontweight="bold")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, linestyle=":", alpha=0.65)
+        ax.legend(loc="lower right", frameon=True)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+
+    with right:
+        fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=120)
+        ax.plot(recall_vals, precision_vals, color=color, linewidth=2.2, label=f"AUPRC={auc_pr:.3f}")
+        ax.axhline(
+            y=positive_rate,
+            color="#94a3b8",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"随机基线={positive_rate:.3f}",
+        )
+        ax.set_title(f"{task_title} AUPRC曲线", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, linestyle=":", alpha=0.65)
+        ax.legend(loc="best", frameon=True)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+
+
+def _render_training_curves(curve_data: dict[str, Any] | None) -> None:
+    if not isinstance(curve_data, dict):
+        return
+    if not curve_data.get("malignant") and not curve_data.get("benign"):
+        return
+
+    st.markdown("<div class='sub-section-title'>各预测子任务 AUROC / AUPRC 曲线</div>", unsafe_allow_html=True)
+    _render_binary_task_curves("恶性病变预测子任务", curve_data.get("malignant", {}), "#c0392b")
+    _render_binary_task_curves("良性病变预测子任务", curve_data.get("benign", {}), "#1a5f7a")
+
+
+def _render_training_result(
+    metrics: dict[str, Any],
+    class_distribution: dict[str, int] | None = None,
+    curve_data: dict[str, Any] | None = None,
+) -> None:
     st.markdown("<div class='section-title'>交叉验证多维评估指标</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("平均AUC", _format_metric(metrics, "auc"))
@@ -355,6 +443,7 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                         </h4>
                         <table>
                             <tr><td>AUC 检测效能</td><td><span class="badge badge-red">{_format_metric(metrics, "malignant_auc")}</span></td></tr>
+                            <tr><td>AUPRC 曲线面积</td><td>{_format_metric(metrics, "malignant_auc_pr")}</td></tr>
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "malignant_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "malignant_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "malignant_accuracy")}</td></tr>
@@ -373,6 +462,7 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                         </h4>
                         <table>
                             <tr><td>AUC 检测效能</td><td><span class="badge badge-blue">{_format_metric(metrics, "benign_auc")}</span></td></tr>
+                            <tr><td>AUPRC 曲线面积</td><td>{_format_metric(metrics, "benign_auc_pr")}</td></tr>
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "benign_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "benign_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_accuracy")}</td></tr>
@@ -381,6 +471,8 @@ def _render_training_result(metrics: dict[str, Any], class_distribution: dict[st
                     """,
                     unsafe_allow_html=True,
                 )
+
+    _render_training_curves(curve_data)
 
     if class_distribution:
         st.markdown("<div class='sub-section-title'>样本类别分布</div>", unsafe_allow_html=True)
@@ -529,6 +621,51 @@ def _read_uploaded_table(uploaded_file: Any) -> pd.DataFrame:
     return pd.read_csv(uploaded_file)
 
 
+def _default_report_export_dir() -> Path:
+    downloads = Path.home() / "Downloads"
+    if downloads.exists():
+        return downloads
+    desktop = Path.home() / "Desktop"
+    if desktop.exists():
+        return desktop
+    return Path.home()
+
+
+def _choose_report_export_dir(initial_dir: Path) -> Path | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        st.error(f"无法打开文件夹选择窗口：{exc}")
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        selected = filedialog.askdirectory(
+            title="选择报告保存目录",
+            initialdir=str(initial_dir if initial_dir.exists() else _default_report_export_dir()),
+            mustexist=True,
+            parent=root,
+        )
+    finally:
+        root.destroy()
+
+    return Path(selected) if selected else None
+
+
+def _copy_report_to_dir(source_path: Path, target_dir: Path) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / source_path.name
+    if source_path.resolve() != target_path.resolve():
+        shutil.copy2(source_path, target_path)
+    return target_path
+
+
 def audit(
     action: str,
     module: str,
@@ -629,16 +766,14 @@ def main() -> None:
     user = current_user()
     assert user is not None
 
-    if APP_ICON_PATH.exists():
-        st.sidebar.image(str(APP_ICON_PATH), width=74)
-        st.sidebar.markdown(
-            """
-            <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:-4px 0 14px;">
-                基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.sidebar.markdown(
+        """
+        <div style="font-size:16px; font-weight:800; color:#1a5f7a; margin:8px 0 18px; line-height:1.55;">
+            基于五项常规肿瘤标志物的乳腺健康智能筛查系统 V1.0
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     username_display = html.escape(str(user["username"]))
     role_display = html.escape(role_to_cn(str(user["role"])))
@@ -968,6 +1103,7 @@ def page_training() -> None:
                 st.session_state["last_training_result"] = {
                     "metrics": result.metrics,
                     "class_distribution": result.class_distribution,
+                    "curve_data": result.curve_data,
                 }
             except Exception as exc:
                 st.error(f"训练失败：{exc}")
@@ -980,6 +1116,7 @@ def page_training() -> None:
         _render_training_result(
             metrics=last_training.get("metrics", {}),
             class_distribution=last_training.get("class_distribution", {}),
+            curve_data=last_training.get("curve_data", {}),
         )
 
 
@@ -1127,29 +1264,85 @@ def page_report() -> None:
 
     followup_df = get_followup_dataframe(subject_id)
     if st.button("生成 HTML + PDF 报告", type="primary"):
-        html_path = generate_report_html(
-            subject=subject,
-            test_row=test_row,
-            evaluation_row=evaluation,
-            followup_df=followup_df,
-            output_dir=Path(REPORT_DIR),
-        )
-        pdf_path = generate_report_pdf(
-            subject=subject,
-            test_row=test_row,
-            evaluation_row=evaluation,
-            followup_df=followup_df,
-            output_dir=Path(REPORT_DIR),
-        )
+        try:
+            html_path = generate_report_html(
+                subject=subject,
+                test_row=test_row,
+                evaluation_row=evaluation,
+                followup_df=followup_df,
+                output_dir=Path(REPORT_DIR),
+            )
+            pdf_path = generate_report_pdf(
+                subject=subject,
+                test_row=test_row,
+                evaluation_row=evaluation,
+                followup_df=followup_df,
+                output_dir=Path(REPORT_DIR),
+            )
+        except ModuleNotFoundError as exc:
+            st.error(str(exc))
+            return
         audit("generate_report", "reports", "test", test_id, {"html": html_path.name, "pdf": pdf_path.name})
-        st.success(f"报告生成完成：{html_path.name}，{pdf_path.name}")
+        st.session_state["last_report_export"] = {
+            "test_id": test_id,
+            "html_path": str(html_path),
+            "pdf_path": str(pdf_path),
+            "html_name": html_path.name,
+            "pdf_name": pdf_path.name,
+        }
 
-        html_content = html_path.read_text(encoding="utf-8")
-        pdf_content = pdf_path.read_bytes()
+    report_export = st.session_state.get("last_report_export")
+    if isinstance(report_export, dict) and report_export.get("test_id") == test_id:
+        html_path = Path(str(report_export.get("html_path", "")))
+        pdf_path = Path(str(report_export.get("pdf_path", "")))
+        if html_path.exists() and pdf_path.exists():
+            st.success(f"报告生成完成：{html_path.name}，{pdf_path.name}")
+            html_content = html_path.read_text(encoding="utf-8")
+            pdf_content = pdf_path.read_bytes()
+            st.markdown("<div class='sub-section-title'>保存到本地文件夹</div>", unsafe_allow_html=True)
+            save_dir_key = f"report_save_dir_{test_id}"
+            if save_dir_key not in st.session_state:
+                st.session_state[save_dir_key] = str(_default_report_export_dir())
 
-        st.download_button("下载 HTML 报告", data=html_content.encode("utf-8"), file_name=html_path.name, mime="text/html")
-        st.download_button("下载 PDF 报告", data=pdf_content, file_name=pdf_path.name, mime="application/pdf")
-        st.components.v1.html(html_content, height=700, scrolling=True)
+            st.write(f"当前保存目录：`{st.session_state[save_dir_key]}`")
+            col_choose, col_save = st.columns([1, 2])
+            with col_choose:
+                if st.button("选择保存目录", key=f"choose_report_dir_{test_id}"):
+                    selected_dir = _choose_report_export_dir(Path(str(st.session_state[save_dir_key])))
+                    if selected_dir is not None:
+                        st.session_state[save_dir_key] = str(selected_dir)
+                        _rerun()
+
+            with col_save:
+                save_clicked = st.button("保存报告到此文件夹", key=f"save_report_files_{test_id}")
+            if save_clicked:
+                try:
+                    target_dir = Path(str(st.session_state[save_dir_key])).expanduser()
+                    saved_html = _copy_report_to_dir(html_path, target_dir)
+                    saved_pdf = _copy_report_to_dir(pdf_path, target_dir)
+                    st.success(f"已保存到：{target_dir}\n\nHTML：{saved_html.name}\n\nPDF：{saved_pdf.name}")
+                except Exception as exc:
+                    st.error(f"保存失败：{exc}")
+
+            st.markdown("<div class='sub-section-title'>浏览器下载备用</div>", unsafe_allow_html=True)
+            st.download_button(
+                "下载 HTML 报告",
+                data=html_content.encode("utf-8"),
+                file_name=html_path.name,
+                mime="text/html",
+                key=f"download_html_report_{test_id}",
+            )
+            st.download_button(
+                "下载 PDF 报告",
+                data=pdf_content,
+                file_name=pdf_path.name,
+                mime="application/pdf",
+                key=f"download_pdf_report_{test_id}",
+            )
+            st.components.v1.html(html_content, height=700, scrolling=True)
+        else:
+            st.warning("报告文件不存在或已被移动，请重新生成报告。")
+            st.session_state.pop("last_report_export", None)
 
 
 def page_audit_logs() -> None:
