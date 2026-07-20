@@ -139,20 +139,37 @@ class BreastRiskModel:
             "malignant_precision": float(malignant_result["metrics"]["precision"]),
             "malignant_recall": float(malignant_result["metrics"]["recall"]),
             "malignant_accuracy": float(malignant_result["metrics"]["accuracy"]),
+            "malignant_val_n": float(malignant_result["metrics"].get("val_n", 0)),
+            "malignant_val_positive_n": float(malignant_result["metrics"].get("val_positive_n", 0)),
+            "malignant_val_negative_n": float(malignant_result["metrics"].get("val_negative_n", 0)),
             "benign_auc": float(benign_result["metrics"]["auc_roc"]),
             "benign_auc_pr": float(benign_result["metrics"]["auc_pr"]),
             "benign_precision": float(benign_result["metrics"]["precision"]),
             "benign_recall": float(benign_result["metrics"]["recall"]),
             "benign_accuracy": float(benign_result["metrics"]["accuracy"]),
+            "benign_val_n": float(benign_result["metrics"].get("val_n", 0)),
+            "benign_val_positive_n": float(benign_result["metrics"].get("val_positive_n", 0)),
+            "benign_val_negative_n": float(benign_result["metrics"].get("val_negative_n", 0)),
             "benign_malignant_auc": float(benign_malignant_result["metrics"]["auc_roc"]),
             "benign_malignant_auc_pr": float(benign_malignant_result["metrics"]["auc_pr"]),
             "benign_malignant_precision": float(benign_malignant_result["metrics"]["precision"]),
             "benign_malignant_recall": float(benign_malignant_result["metrics"]["recall"]),
             "benign_malignant_accuracy": float(benign_malignant_result["metrics"]["accuracy"]),
+            "benign_malignant_val_n": float(benign_malignant_result["metrics"].get("val_n", 0)),
+            "benign_malignant_val_positive_n": float(
+                benign_malignant_result["metrics"].get("val_positive_n", 0)
+            ),
+            "benign_malignant_val_negative_n": float(
+                benign_malignant_result["metrics"].get("val_negative_n", 0)
+            ),
             "multiclass_accuracy": float(multiclass_result["metrics"]["accuracy"]),
             "multiclass_balanced_accuracy": float(multiclass_result["metrics"]["balanced_accuracy"]),
             "multiclass_precision_macro": float(multiclass_result["metrics"]["precision_macro"]),
             "multiclass_recall_macro": float(multiclass_result["metrics"]["recall_macro"]),
+            "multiclass_val_n": float(multiclass_result["metrics"].get("val_n", 0)),
+            "multiclass_val_normal_n": float(multiclass_result["metrics"].get("val_normal_n", 0)),
+            "multiclass_val_benign_n": float(multiclass_result["metrics"].get("val_benign_n", 0)),
+            "multiclass_val_malignant_n": float(multiclass_result["metrics"].get("val_malignant_n", 0)),
         }
         self.train_metrics = metrics
         curve_data = {
@@ -404,6 +421,9 @@ class BreastRiskModel:
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
+            "val_n": float(len(y_val)),
+            "val_positive_n": float(np.sum(y_val == 1)),
+            "val_negative_n": float(np.sum(y_val == 0)),
         }
 
         feature_importance = self._average_feature_importance(models)
@@ -464,6 +484,9 @@ class BreastRiskModel:
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
+            "val_n": float(len(y_val)),
+            "val_positive_n": float(np.sum(y_val == 1)),
+            "val_negative_n": float(np.sum(y_val == 0)),
         }
 
         return {
@@ -559,6 +582,9 @@ class BreastRiskModel:
             "accuracy": float(accuracy_score(y_val, y_pred)),
             "precision": float(precision_score(y_val, y_pred, zero_division=0)),
             "recall": float(recall_score(y_val, y_pred, zero_division=0)),
+            "val_n": float(len(y_val)),
+            "val_positive_n": float(np.sum(y_val == 1)),
+            "val_negative_n": float(np.sum(y_val == 0)),
         }
         feature_importance = self._average_feature_importance(models)
         return {
@@ -884,6 +910,10 @@ class BreastRiskModel:
             "balanced_accuracy": float(balanced_accuracy_score(y_val, y_pred)),
             "precision_macro": float(precision_score(y_val, y_pred, average="macro", zero_division=0)),
             "recall_macro": float(recall_score(y_val, y_pred, average="macro", zero_division=0)),
+            "val_n": float(len(y_val)),
+            "val_normal_n": float(np.sum(y_val == "normal")),
+            "val_benign_n": float(np.sum(y_val == "benign")),
+            "val_malignant_n": float(np.sum(y_val == "malignant")),
         }
 
         return {

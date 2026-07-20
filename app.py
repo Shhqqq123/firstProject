@@ -354,6 +354,13 @@ def _format_metric(metrics: dict[str, Any], key: str) -> str:
     return f"{float(value):.4f}"
 
 
+def _format_count(metrics: dict[str, Any], key: str) -> str:
+    value = metrics.get(key)
+    if value is None:
+        return "-"
+    return str(int(round(float(value))))
+
+
 def _render_binary_task_curves(task_title: str, curve_data: dict[str, Any], color: str) -> None:
     if not curve_data:
         return
@@ -424,12 +431,16 @@ def _render_training_result(
     class_distribution: dict[str, int] | None = None,
     curve_data: dict[str, Any] | None = None,
 ) -> None:
-    st.markdown("<div class='section-title'>交叉验证多维评估指标</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>双专家二分类平均指标</div>", unsafe_allow_html=True)
+    st.info(
+        "下方四个平均值只汇总“恶性 vs 正常”和“良性 vs 正常”两个子任务，"
+        "用于判断肿瘤标志物能否识别异常，不等同于“良性/恶性/正常”三分类准确率。"
+    )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("平均AUC", _format_metric(metrics, "auc"))
-    c2.metric("平均Precision", _format_metric(metrics, "precision"))
-    c3.metric("平均Recall", _format_metric(metrics, "recall"))
-    c4.metric("平均Accuracy", _format_metric(metrics, "accuracy"))
+    c1.metric("二分类平均AUC", _format_metric(metrics, "auc"))
+    c2.metric("二分类平均Precision", _format_metric(metrics, "precision"))
+    c3.metric("二分类平均Recall", _format_metric(metrics, "recall"))
+    c4.metric("二分类平均Accuracy", _format_metric(metrics, "accuracy"))
 
     if "malignant_auc" in metrics or "benign_auc" in metrics:
         st.markdown("<div class='sub-section-title'>各预测子任务性能详情</div>", unsafe_allow_html=True)
@@ -448,6 +459,7 @@ def _render_training_result(
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "malignant_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "malignant_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "malignant_accuracy")}</td></tr>
+                            <tr><td>验证集样本数</td><td>{_format_count(metrics, "malignant_val_n")}（恶性 {_format_count(metrics, "malignant_val_positive_n")} / 正常 {_format_count(metrics, "malignant_val_negative_n")}）</td></tr>
                         </table>
                     </div>
                     """,
@@ -467,6 +479,7 @@ def _render_training_result(
                             <tr><td>Precision 精确率</td><td>{_format_metric(metrics, "benign_precision")}</td></tr>
                             <tr><td>Recall 召回率</td><td>{_format_metric(metrics, "benign_recall")}</td></tr>
                             <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_accuracy")}</td></tr>
+                            <tr><td>验证集样本数</td><td>{_format_count(metrics, "benign_val_n")}（良性 {_format_count(metrics, "benign_val_positive_n")} / 正常 {_format_count(metrics, "benign_val_negative_n")}）</td></tr>
                         </table>
                     </div>
                     """,
@@ -486,11 +499,17 @@ def _render_training_result(
                         <tr><td>Precision 精确率（良性为阳性）</td><td>{_format_metric(metrics, "benign_malignant_precision")}</td></tr>
                         <tr><td>Recall 召回率（良性为阳性）</td><td>{_format_metric(metrics, "benign_malignant_recall")}</td></tr>
                         <tr><td>Accuracy 准确率</td><td>{_format_metric(metrics, "benign_malignant_accuracy")}</td></tr>
+                        <tr><td>验证集样本数</td><td>{_format_count(metrics, "benign_malignant_val_n")}（良性 {_format_count(metrics, "benign_malignant_val_positive_n")} / 恶性 {_format_count(metrics, "benign_malignant_val_negative_n")}）</td></tr>
                     </table>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+            if metrics.get("benign_malignant_val_n") is not None and float(metrics["benign_malignant_val_n"]) < 40:
+                st.warning(
+                    "良性vs恶性直接判别的内部验证样本较少，单次切分结果波动会很大；"
+                    "这项指标更适合作为提示，最终要以外部验证集表现为准。"
+                )
 
         if "multiclass_accuracy" in metrics:
             st.markdown(
@@ -504,6 +523,7 @@ def _render_training_result(
                         <tr><td>Balanced Accuracy 平衡准确率</td><td>{_format_metric(metrics, "multiclass_balanced_accuracy")}</td></tr>
                         <tr><td>Macro Precision 宏平均精确率</td><td>{_format_metric(metrics, "multiclass_precision_macro")}</td></tr>
                         <tr><td>Macro Recall 宏平均召回率</td><td>{_format_metric(metrics, "multiclass_recall_macro")}</td></tr>
+                        <tr><td>验证集样本数</td><td>{_format_count(metrics, "multiclass_val_n")}（正常 {_format_count(metrics, "multiclass_val_normal_n")} / 良性 {_format_count(metrics, "multiclass_val_benign_n")} / 恶性 {_format_count(metrics, "multiclass_val_malignant_n")}）</td></tr>
                     </table>
                 </div>
                 """,
