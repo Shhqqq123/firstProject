@@ -59,8 +59,10 @@ class BreastRiskModel:
         self.malignant_threshold: float = 0.5
         self.benign_threshold: float = 0.5
         self.benign_malignant_threshold: float = 0.5
-        self.disease_gate_threshold: float = 0.25
-        self.malignant_disease_threshold: float = 0.5
+        self.disease_gate_threshold: float = 0.30
+        self.max_disease_gate_threshold: float = 0.30
+        self.malignant_disease_threshold: float = 0.45
+        self.max_malignant_disease_threshold: float = 0.45
         self.malignant_guard_threshold: float = 0.34
         self.malignant_guard_margin: float = 0.08
         self.global_feature_importance: dict[str, float] = {}
@@ -332,23 +334,39 @@ class BreastRiskModel:
         )
 
         y_disease = (y_val != "normal").astype(int)
-        disease_candidates = self._threshold_candidates(abnormal_score, low=0.05, high=0.80)
+        disease_candidates = self._threshold_candidates(
+            abnormal_score,
+            low=0.05,
+            high=min(0.80, self.max_disease_gate_threshold),
+        )
         disease_options: list[tuple[float, float, float]] = []
         for threshold in disease_candidates:
             pred_disease = (abnormal_score >= threshold).astype(int)
             recall = recall_score(y_disease, pred_disease, zero_division=0)
             balanced = balanced_accuracy_score(y_disease, pred_disease)
-            disease_options.append((balanced + 0.10 * recall, float(threshold), float(recall)))
+            normal_specificity = recall_score(1 - y_disease, 1 - pred_disease, zero_division=0)
+            disease_options.append(
+                (
+                    0.70 * recall + 0.20 * balanced + 0.10 * normal_specificity,
+                    float(threshold),
+                    float(recall),
+                )
+            )
 
-        feasible_disease = [item for item in disease_options if item[2] >= 0.90]
+        feasible_disease = [item for item in disease_options if item[2] >= 0.97]
         if not feasible_disease:
-            feasible_disease = [item for item in disease_options if item[2] >= 0.85]
+            feasible_disease = [item for item in disease_options if item[2] >= 0.94]
         disease_gate = max(feasible_disease or disease_options, key=lambda item: item[0])[1]
+        disease_gate = min(float(disease_gate), float(self.max_disease_gate_threshold))
 
         diseased_mask = y_val != "normal"
         y_malignant = (y_val[diseased_mask] == "malignant").astype(int)
         malignant_scores = malignancy_score[diseased_mask]
-        malignant_candidates = self._threshold_candidates(malignant_scores, low=0.20, high=0.80)
+        malignant_candidates = self._threshold_candidates(
+            malignant_scores,
+            low=0.20,
+            high=min(0.80, self.max_malignant_disease_threshold),
+        )
         malignant_options: list[tuple[float, float, float]] = []
         true_malignant_rate = float(np.mean(y_malignant)) if len(y_malignant) else 0.5
         for threshold in malignant_candidates:
@@ -361,6 +379,7 @@ class BreastRiskModel:
 
         feasible_malignant = [item for item in malignant_options if item[2] >= 0.65]
         malignant_gate = max(feasible_malignant or malignant_options, key=lambda item: item[0])[1]
+        malignant_gate = min(float(malignant_gate), float(self.max_malignant_disease_threshold))
 
         y_pred = self._apply_two_stage_thresholds(abnormal_score, malignancy_score, disease_gate, malignant_gate)
         disease_pred = (np.asarray(y_pred) != "normal").astype(int)
@@ -455,7 +474,9 @@ class BreastRiskModel:
             "benign_threshold": self.benign_threshold,
             "benign_malignant_threshold": self.benign_malignant_threshold,
             "disease_gate_threshold": self.disease_gate_threshold,
+            "max_disease_gate_threshold": self.max_disease_gate_threshold,
             "malignant_disease_threshold": self.malignant_disease_threshold,
+            "max_malignant_disease_threshold": self.max_malignant_disease_threshold,
             "malignant_guard_threshold": self.malignant_guard_threshold,
             "malignant_guard_margin": self.malignant_guard_margin,
             "global_feature_importance": self.global_feature_importance,
@@ -491,9 +512,20 @@ class BreastRiskModel:
         model.malignant_threshold = float(payload.get("malignant_threshold", 0.5))
         model.benign_threshold = float(payload.get("benign_threshold", 0.5))
         model.benign_malignant_threshold = float(payload.get("benign_malignant_threshold", 0.5))
+        model.max_disease_gate_threshold = float(
+            payload.get("max_disease_gate_threshold", model.max_disease_gate_threshold)
+        )
         model.disease_gate_threshold = float(payload.get("disease_gate_threshold", model.disease_gate_threshold))
+        model.disease_gate_threshold = min(model.disease_gate_threshold, model.max_disease_gate_threshold)
         model.malignant_disease_threshold = float(
             payload.get("malignant_disease_threshold", model.malignant_disease_threshold)
+        )
+        model.max_malignant_disease_threshold = float(
+            payload.get("max_malignant_disease_threshold", model.max_malignant_disease_threshold)
+        )
+        model.malignant_disease_threshold = min(
+            model.malignant_disease_threshold,
+            model.max_malignant_disease_threshold,
         )
         model.malignant_guard_threshold = float(payload.get("malignant_guard_threshold", 0.34))
         model.malignant_guard_margin = float(payload.get("malignant_guard_margin", 0.08))
