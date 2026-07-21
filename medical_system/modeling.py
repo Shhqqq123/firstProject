@@ -62,7 +62,9 @@ class BreastRiskModel:
         self.disease_gate_threshold: float = 0.30
         self.max_disease_gate_threshold: float = 0.30
         self.malignant_disease_threshold: float = 0.45
+        self.min_malignant_disease_threshold: float = 0.45
         self.max_malignant_disease_threshold: float = 0.45
+        self.uncertainty_margin: float = 0.07
         self.malignant_guard_threshold: float = 0.34
         self.malignant_guard_margin: float = 0.08
         self.global_feature_importance: dict[str, float] = {}
@@ -248,6 +250,13 @@ class BreastRiskModel:
                 predicted_class = "malignant"
             else:
                 predicted_class = "benign"
+            malignancy_margin = abs(float(malignancy_score[idx]) - self.malignant_disease_threshold)
+            if abnormal_score[idx] < self.disease_gate_threshold:
+                decision_status = "normal_low_risk"
+            elif malignancy_margin <= self.uncertainty_margin:
+                decision_status = "disease_indeterminate"
+            else:
+                decision_status = "disease_confident"
 
             max_other = max(value for key, value in probs.items() if key != predicted_class)
             if probs[predicted_class] <= max_other:
@@ -263,6 +272,8 @@ class BreastRiskModel:
                     "confidence": float(probs[predicted_class]),
                     "abnormal_score": float(abnormal_score[idx]),
                     "malignancy_score": float(malignancy_score[idx]),
+                    "malignancy_margin": float(malignancy_margin),
+                    "decision_status": decision_status,
                 }
             )
         return decisions
@@ -364,7 +375,7 @@ class BreastRiskModel:
         malignant_scores = malignancy_score[diseased_mask]
         malignant_candidates = self._threshold_candidates(
             malignant_scores,
-            low=0.20,
+            low=max(0.20, self.min_malignant_disease_threshold),
             high=min(0.80, self.max_malignant_disease_threshold),
         )
         malignant_options: list[tuple[float, float, float]] = []
@@ -476,7 +487,9 @@ class BreastRiskModel:
             "disease_gate_threshold": self.disease_gate_threshold,
             "max_disease_gate_threshold": self.max_disease_gate_threshold,
             "malignant_disease_threshold": self.malignant_disease_threshold,
+            "min_malignant_disease_threshold": self.min_malignant_disease_threshold,
             "max_malignant_disease_threshold": self.max_malignant_disease_threshold,
+            "uncertainty_margin": self.uncertainty_margin,
             "malignant_guard_threshold": self.malignant_guard_threshold,
             "malignant_guard_margin": self.malignant_guard_margin,
             "global_feature_importance": self.global_feature_importance,
@@ -520,13 +533,20 @@ class BreastRiskModel:
         model.malignant_disease_threshold = float(
             payload.get("malignant_disease_threshold", model.malignant_disease_threshold)
         )
+        model.min_malignant_disease_threshold = float(
+            payload.get("min_malignant_disease_threshold", model.min_malignant_disease_threshold)
+        )
         model.max_malignant_disease_threshold = float(
             payload.get("max_malignant_disease_threshold", model.max_malignant_disease_threshold)
         )
-        model.malignant_disease_threshold = min(
-            model.malignant_disease_threshold,
-            model.max_malignant_disease_threshold,
+        model.malignant_disease_threshold = float(
+            np.clip(
+                model.malignant_disease_threshold,
+                model.min_malignant_disease_threshold,
+                model.max_malignant_disease_threshold,
+            )
         )
+        model.uncertainty_margin = float(payload.get("uncertainty_margin", model.uncertainty_margin))
         model.malignant_guard_threshold = float(payload.get("malignant_guard_threshold", 0.34))
         model.malignant_guard_margin = float(payload.get("malignant_guard_margin", 0.08))
         model.global_feature_importance = payload.get("global_feature_importance", {})

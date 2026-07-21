@@ -844,6 +844,17 @@ def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame) -> 
         probabilities = pred["probabilities"]
         predicted_class = pred["predicted_class"]
         confidence = float(pred["confidence"])
+        decision_status = str(pred.get("decision_status", ""))
+        if decision_status == "disease_indeterminate":
+            interpretation = "良恶性不确定，建议结合影像/病理复核"
+        elif decision_status == "normal_low_risk":
+            interpretation = "病变可能性低"
+        elif predicted_class == "malignant":
+            interpretation = "恶性倾向"
+        elif predicted_class == "benign":
+            interpretation = "良性倾向"
+        else:
+            interpretation = "正常倾向"
         risk_level = get_risk_level(
             predicted_class=predicted_class,
             malignant_prob=probabilities.get("malignant", 0.0),
@@ -853,10 +864,13 @@ def _run_batch_prediction(model: BreastRiskModel, uploaded_df: pd.DataFrame) -> 
             {
                 "预测类别": to_cn_class(predicted_class),
                 "风险等级": risk_level,
+                "判读建议": interpretation,
                 "可信度": round(confidence, 4),
                 "正常概率": round(float(probabilities.get("normal", 0.0)), 4),
                 "良性概率": round(float(probabilities.get("benign", 0.0)), 4),
                 "恶性概率": round(float(probabilities.get("malignant", 0.0)), 4),
+                "病变分数": round(float(pred.get("abnormal_score", 0.0)), 4),
+                "恶性倾向分数": round(float(pred.get("malignancy_score", 0.0)), 4),
             }
         )
     return pd.concat([original_df.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
@@ -884,7 +898,17 @@ def _normalize_cn_label(value: Any) -> str | None:
 
 
 def _find_truth_label_column(df: pd.DataFrame) -> str | None:
-    skip_columns = {"预测类别", "风险等级", "可信度", "正常概率", "良性概率", "恶性概率"}
+    skip_columns = {
+        "预测类别",
+        "风险等级",
+        "判读建议",
+        "可信度",
+        "正常概率",
+        "良性概率",
+        "恶性概率",
+        "病变分数",
+        "恶性倾向分数",
+    }
     preferred = ["检查结果", "真实标签", "label", "Label", "结果"]
     candidates = [c for c in preferred if c in df.columns]
     candidates.extend([c for c in df.columns if c not in preferred])
@@ -919,6 +943,10 @@ def _render_batch_validation_metrics(result_df: pd.DataFrame) -> None:
     accuracy = float((y_true == y_pred).mean())
     st.markdown("<div class='sub-section-title'>批量验证统计</div>", unsafe_allow_html=True)
     st.metric("验证集准确率", f"{accuracy:.4f}", help=f"真实标签列：{truth_col}，有效样本数：{len(y_true)}")
+    if "判读建议" in result_df.columns:
+        uncertain_count = int(result_df.loc[valid, "判读建议"].astype(str).str.contains("不确定").sum())
+        if uncertain_count:
+            st.metric("良恶性不确定样本", uncertain_count, help="恶性倾向分数接近阈值，建议结合影像或病理复核。")
     true_labels = set(y_true.dropna().unique())
     if true_labels and "正常" not in true_labels:
         disease_mask = y_true.isin(["良性", "恶性"])
